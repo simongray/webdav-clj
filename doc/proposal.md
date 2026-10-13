@@ -221,11 +221,12 @@ data in and data out: the XML goes through qname-hiccup, the paths
 through whatwg-url and the dates through a few lines of arithmetic. Only
 two things differ by platform:
 
-- On the JVM the body of a PUT is an InputStream, which the handler
-  hands `:put!` behind its limit, so a backend can write a large file as
-  it comes. An XML body it reads itself, within its own smaller limit.
-  In ClojureScript the adapter must give bytes or a string, as for
-  websub-clj's hub.
+- The body of a PUT is a stream, which the handler hands `:put!` behind
+  its limit, so a backend can write a large file as it comes: an
+  InputStream on the JVM, and a ReadableStream in ClojureScript, which
+  is what a Service Worker, Deno and Bun get. A Node stream becomes one
+  too. An XML body the handler reads itself, within its own smaller
+  limit.
 - A backend in ClojureScript (e.g. over IndexedDB or node:fs) returns
   promises, so the handler chains every call with wary-fetch's
   `async/then`. On the JVM a backend returns plain values, and `then`
@@ -606,8 +607,6 @@ write:
 Nice-to-haves
 -------------
 
-- **Streaming in ClojureScript,** where the adapter must read the body
-  of a PUT first. Node's streams would need a body of their own.
 - **Accepting Windows' Win32 properties** in a backend without dead
   properties, so that Explorer copies without an error.
 - **The Content-Range of a partial PUT** (Apache's extension), which
@@ -630,8 +629,8 @@ The questions of this proposal, as Simon settled them on 13 October
 3. **CalDAV and CardDAV get libraries of their own,** caldav-clj and
    carddav-clj, on webdav-clj and ical-clj.
 4. **:max-bytes stays at 32 MB** while bodies are held in memory, and
-   grows once they stream. They stream on the JVM now, so it's 1 GB, and
-   GET answers Range requests too.
+   grows once they stream. They stream on both platforms now, so it's
+   1 GB, and GET answers Range requests too.
 5. **The recorded answers come from containers on localhost,** Nextcloud
    and mod_dav, which cost nothing. Fastmail and Hetzner wait.
 6. **qname-hiccup changes first,** at least writing on one line and

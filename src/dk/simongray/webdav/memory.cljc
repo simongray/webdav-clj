@@ -5,7 +5,8 @@
   The atom holds a map of :resources, from path to a map of the resource
   with its :body as bytes and its dead :props by name, and the last
   number that an ETag was made of as :etags."
-  (:require [dk.simongray.wary-fetch.bytes :as bytes]
+  (:require [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.webdav.impl.ring :as ring]
             [dk.simongray.webdav.paths :as paths]))
 
@@ -97,10 +98,11 @@
                     (get-in @a [:resources path :body]))
     :put!         (fn [path body opts]
                     ;; the whole body first, which can fail past a limit
-                    (let [b (ring/->bytes body)]
-                      (-> (swap! a written path b opts (clock))
-                          (get-in [:resources path])
-                          resource)))
+                    (async/then (ring/read-all body)
+                                (fn [b]
+                                  (-> (swap! a written path b opts (clock))
+                                      (get-in [:resources path])
+                                      resource))))
     :mkcol!       (fn [path]
                     (let [t (clock)]
                       (swap! a assoc-in [:resources path]

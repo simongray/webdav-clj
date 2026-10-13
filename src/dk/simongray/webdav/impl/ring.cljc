@@ -21,11 +21,94 @@
   (some->> (get headers "content-length") str str/trim (re-matches #"\d{1,18}")
            parse-long))
 
+#?(:cljs
+   (defn- stream?
+     "Whether the `body` is a stream: a ReadableStream, or an async iterable
+     of bytes such as a Node stream."
+     [body]
+     (boolean (and (some? body)
+                   (not (string? body))
+                   (or (and (exists? js/ReadableStream) (instance? js/ReadableStream body))
+                       (fn? (unchecked-get body js/Symbol.asyncIterator)))))))
+
+#?(:cljs
+   (defn- readable
+     "The stream `body` as a ReadableStream."
+     [body]
+     (if (instance? js/ReadableStream body)
+       body
+       (let [it (.call (unchecked-get body js/Symbol.asyncIterator) body)]
+         (js/ReadableStream.
+          #js {:pull   (fn [controller]
+                         (.then (.next it)
+                                (fn [result]
+                                  (if (unchecked-get result "done")
+                                    (.close controller)
+                                    (.enqueue controller (unchecked-get result "value"))))))
+               :cancel (fn [_]
+                         (when-let [f (unchecked-get it "return")]
+                           (.call f it)))})))))
+
+#?(:cljs
+   (defn- of-bytes
+     "A ReadableStream of the bytes `b`."
+     [b]
+     (js/ReadableStream. #js {:start (fn [controller]
+                                       (when (pos? (.-length b))
+                                         (.enqueue controller b))
+                                       (.close controller))})))
+
+#?(:cljs
+   (defn- joined
+     "The bytes of the `chunks`, a JS array of bytes, which hold `total`
+     bytes in all."
+     [chunks total]
+     (let [b (js/Uint8Array. total)]
+       (reduce (fn [offset chunk]
+                 (.set b chunk offset)
+                 (+ offset (.-length chunk)))
+               0
+               chunks)
+       b)))
+
+#?(:cljs
+   (defn- read-upto
+     "A promise of the bytes of the ReadableStream `s`, which stops reading
+     once it has more than `n`."
+     [s n]
+     (let [reader (.getReader s)
+           chunks #js []]
+       (letfn [(step [total]
+                 (if (> total n)
+                   (do (.cancel reader)
+                       (joined chunks total))
+                   (.then (.read reader)
+                          (fn [result]
+                            (if (unchecked-get result "done")
+                              (joined chunks total)
+                              (let [chunk (unchecked-get result "value")]
+                                (.push chunks chunk)
+                                (step (+ total (.-length chunk)))))))))]
+         (step 0)))))
+
+;; on the JVM a stream is read as it's needed instead
+#?(:cljs
+   (defn buffered
+     "A promise of the Ring `request` with a body that's a stream read into
+     bytes, up to one byte more than `max-bytes`, so that a body past the
+     limit stays past it. A PUT keeps its stream, which :put! reads as it
+     comes."
+     [request max-bytes]
+     (let [body (:body request)]
+       (if (and (stream? body) (not= :put (:request-method request)))
+         (.then (read-upto (readable body) max-bytes) #(assoc request :body %))
+         (js/Promise.resolve request)))))
+
 (defn body-bytes
   "The bytes of the `body` of a Ring request, which is a string, bytes, a
   stream or nil, or nil when it holds more than `max-bytes`. In
-  ClojureScript a stream gives nil too, so a server there reads the body
-  first."
+  ClojureScript a stream gives nil too, since the handler reads one into
+  bytes first with buffered."
   [body max-bytes]
   ;; the most that an array holds on the JVM
   (let [max-bytes (min max-bytes (- 2147483647 9))
@@ -60,27 +143,38 @@
   #?(:clj  (if (bytes? content) (ByteArrayInputStream. ^bytes content) content)
      :cljs content))
 
-#?(:clj
-   (defn limited
-     "The stream `in`, which throws a refusal of 413 once more than
-     `max-bytes` have been read from it."
-     ^InputStream [^InputStream in max-bytes]
-     (let [total   (volatile! 0)
-           counted (fn [n]
-                     (when (and (pos? n) (> (vswap! total + n) max-bytes))
-                       (throw (ex-info (str "The body holds more than " max-bytes " bytes")
-                                       {:dk.simongray.webdav/status 413})))
-                     n)]
-       (proxy [FilterInputStream] [in]
-         (read
-           ([]
-            (let [b (proxy-super read)]
-              (counted (if (neg? b) 0 1))
-              b))
-           ([bs]
-            (.read ^InputStream this ^bytes bs 0 (alength ^bytes bs)))
-           ([bs off len]
-            (counted (proxy-super read bs off len))))))))
+(defn- too-large
+  "The refusal of a body that holds more than `max-bytes`."
+  [max-bytes]
+  (ex-info (str "The body holds more than " max-bytes " bytes")
+           {:dk.simongray.webdav/status 413}))
+
+(defn limited
+  "The stream `in`, which fails with a refusal of 413 once more than
+  `max-bytes` have been read from it: on the JVM an InputStream that
+  throws, and in ClojureScript a ReadableStream that errors."
+  [in max-bytes]
+  #?(:clj  (let [total   (volatile! 0)
+                 counted (fn [n]
+                           (when (and (pos? n) (> (vswap! total + n) max-bytes))
+                             (throw (too-large max-bytes)))
+                           n)]
+             (proxy [FilterInputStream] [in]
+               (read
+                 ([]
+                  (let [b (proxy-super read)]
+                    (counted (if (neg? b) 0 1))
+                    b))
+                 ([bs]
+                  (.read ^InputStream this ^bytes bs 0 (alength ^bytes bs)))
+                 ([bs off len]
+                  (counted (proxy-super read bs off len))))))
+     :cljs (let [total (volatile! 0)]
+             (.pipeThrough in (js/TransformStream.
+                               #js {:transform (fn [chunk controller]
+                                                 (if (> (vswap! total + (.-length chunk)) max-bytes)
+                                                   (.error controller (too-large max-bytes))
+                                                   (.enqueue controller chunk)))})))))
 
 #?(:clj
    (defn- bounded
@@ -116,24 +210,40 @@
              (not (neg? (.read in))) (recur (dec left))))))))
 
 (defn put-body
-  "The `content` of a document as :put! takes it: on the JVM a stream, and
-  in ClojureScript bytes."
+  "The `content` of a document as :put! takes it: a stream, on the JVM an
+  InputStream and in ClojureScript a ReadableStream."
   [content]
   #?(:clj  (if (instance? InputStream content)
              content
              (ByteArrayInputStream. ^bytes (->bytes content)))
-     :cljs (->bytes content)))
+     :cljs (if (stream? content)
+             (readable content)
+             (of-bytes (->bytes content)))))
 
 (defn request-body
   "The `body` of a Ring request as :put! takes it, or nil when it's known
-  to hold more than `max-bytes` already. On the JVM a stream stays a
-  stream, which throws a refusal of 413 once more than `max-bytes` are
-  read from it, so that a backend can write it as it comes."
+  to hold more than `max-bytes` already. A stream stays a stream, which
+  fails with a refusal of 413 once more than `max-bytes` are read from
+  it, so that a backend can write it as it comes."
   [body max-bytes]
   #?(:clj  (if (instance? InputStream body)
              (limited body max-bytes)
              (some-> (body-bytes body max-bytes) put-body))
-     :cljs (body-bytes body max-bytes)))
+     :cljs (if (stream? body)
+             (limited (readable body) max-bytes)
+             (some-> (body-bytes body max-bytes) put-body))))
+
+(defn read-all
+  "The bytes of the `body` that :put! takes, read to its end: on the JVM
+  at once, and in ClojureScript a promise. It fails with the body's
+  refusal when the body is past its limit."
+  [body]
+  ;; not through a Response, whose arrayBuffer in Chromium rejects with a
+  ;; TypeError of its own rather than the refusal
+  #?(:clj  (->bytes body)
+     :cljs (if (stream? body)
+             (read-upto (readable body) ##Inf)
+             (->bytes body))))
 
 (defn slice
   "The bytes from `start` to `end`, both included, of the `content` of a

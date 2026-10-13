@@ -165,16 +165,51 @@
                                                      "If-Range" "Mon, 01 Jan 2001 00:00:00 GMT"})
                  {:status 200}))))
 
-#?(:clj
-   (deftest streamed-bodies
-     (let [share-atom (atom {})
-           h          (share share-atom {:max-bytes 8})
-           stream     #(java.io.ByteArrayInputStream. (.getBytes ^String %))]
-       (run (expect h (ring :put "/dav/a.txt" :body (stream "12345678")) {:status 201})
-            (expect h (ring :put "/dav/a.txt" :body (stream "123456789")) {:status 413})
-            (expect h (ring :get "/dav/a.txt") {:body "12345678"})
-            (fn [] (is (= 1 (count (filter #(= ["a.txt"] %) (keys (:resources @share-atom))))))
-                   "a body past the limit changes nothing")))))
+(defn- stream
+  "A stream of the UTF-8 of the text `s`, in ClojureScript a ReadableStream
+  of two chunks."
+  [s]
+  #?(:clj  (java.io.ByteArrayInputStream. (.getBytes ^String s "UTF-8"))
+     :cljs (let [b (bytes/encode s)
+                 n (quot (.-length b) 2)]
+             (js/ReadableStream. #js {:start (fn [controller]
+                                               (.enqueue controller (.subarray b 0 n))
+                                               (.enqueue controller (.subarray b n))
+                                               (.close controller))}))))
+
+#?(:cljs
+   (defn- iterable
+     "An async iterable of the UTF-8 of the text `s`, as a Node stream is."
+     [s]
+     (let [chunks (atom [(bytes/encode s)])]
+       (doto #js {}
+         (unchecked-set js/Symbol.asyncIterator
+                        (fn []
+                          #js {:next (fn []
+                                       (js/Promise.resolve
+                                        (if-let [chunk (first @chunks)]
+                                          (do (swap! chunks rest)
+                                              #js {:done false :value chunk})
+                                          #js {:done true})))}))))))
+
+(deftest streamed-bodies
+  (let [share-atom (atom {})
+        h          (share share-atom {:max-bytes 8 :max-xml-bytes 200})]
+    (run (expect h (ring :put "/dav/a.txt" :body (stream "12345678")) {:status 201})
+         (expect h (ring :put "/dav/a.txt" :body (stream "123456789")) {:status 413})
+         (expect h (ring :get "/dav/a.txt") {:body "12345678"})
+         #?(:cljs (expect h (ring :put "/dav/b.txt" :body (iterable "1234")) {:status 201}))
+         #?(:cljs (expect h (ring :put "/dav/b.txt" :body (iterable "123456789")) {:status 413}))
+         #?(:cljs (expect h (ring :get "/dav/b.txt") {:body "1234"}))
+         (expect h (ring :propfind "/dav/a.txt" :headers {"Depth" "0"}
+                         :body (stream (propfind-body :dav/getcontentlength)))
+                 #(is (= [:dav/getcontentlength {} "8"]
+                         (:dav/getcontentlength (props % "/dav/a.txt" 200)))))
+         (expect h (ring :propfind "/dav/a.txt" :headers {"Depth" "0"}
+                         :body (stream (apply str (repeat 201 " "))))
+                 {:status 413})
+         (fn [] (is (= 1 (count (filter #(= ["a.txt"] %) (keys (:resources @share-atom))))))
+                "a body past the limit changes nothing"))))
 
 (deftest conditional-requests
   (let [h (share)]

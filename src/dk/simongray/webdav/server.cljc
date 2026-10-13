@@ -27,15 +27,17 @@
   methods. Without :copy! and :move! it copies with the other functions,
   and moves by copying and deleting.
 
-  A :put! takes the body and a map of its :content-type. On the JVM the
-  body is an InputStream, which throws a refusal of 413 once more than
-  :max-bytes are read from it, so a backend can write it to a file as it
-  comes, but should read it all before it replaces anything. In
-  ClojureScript it's bytes. For a conditional request, the map also has
-  the :if-etag, the :etag of the resource map that the handler checked
-  (nil when nothing was there), so that a backend that can write
-  conditionally refuses a document that changed since. A :patch-props!
-  takes the operations in order: [:set element] and [:remove name].
+  A :put! takes the body and a map of its :content-type. The body is a
+  stream, which fails with a refusal of 413 once more than :max-bytes are
+  read from it, so a backend can write it to a file as it comes, but
+  should read it all before it replaces anything. On the JVM it's an
+  InputStream, and in ClojureScript a ReadableStream. To keep the whole
+  body in memory, read it with body-bytes. For a conditional request,
+  the map also has the :if-etag, the :etag of the resource map that the
+  handler checked (nil when nothing was there), so that a backend that
+  can write conditionally refuses a document that changed since. A
+  :patch-props! takes the operations in order: [:set element] and
+  [:remove name].
 
   The functions that write return nil. When :delete!, :copy! or :move!
   can't change some members, they can return a map of those paths to a
@@ -743,6 +745,13 @@
     (:locks opts) (assoc ::props/activelocks
                          (mapv #(locks/activelock % now) (locks/covering locks path)))))
 
+(defn body-bytes
+  "The bytes of the `body` that :put! takes, read to its end: on the JVM
+  at once, and in ClojureScript a promise. It fails with the refusal of a
+  body past :max-bytes, which the handler then answers."
+  [body]
+  (ring/read-all body))
+
 (defn propstats
   "The propstats of the resource at `path`, whose map is `resource`, for
   the `propfind`, as xml/read-propfind returns it, in the context `ctx`
@@ -1127,9 +1136,13 @@
   credentials, so mount it behind your login. Windows sends OPTIONS and
   PROPFIND to / and to each collection above the root before it maps a
   share, so route those to the handler too, which answers them as for a
-  bare collection. It takes the arguments of a
-  synchronous and of an asynchronous handler, and in ClojureScript it
-  returns a promise of the response, whose body must be a string or bytes.
+  bare collection.
+
+  It takes the arguments of a synchronous and of an asynchronous handler.
+  The body of a request can be a string, bytes or a stream: an
+  InputStream on the JVM, and in ClojureScript a ReadableStream or a Node
+  stream. In ClojureScript the handler returns a promise of the response,
+  whose body is a string or bytes.
 
   A function of :methods gets the context of the request: a map of the
   :request (with lower-case headers), the :path, the :resource map (nil
@@ -1147,4 +1160,6 @@
   ([backend opts]
    (let [opts (-> (merge default-options opts)
                   (update :root paths/root))]
-     (ring/handler #(answer backend opts %)))))
+     (ring/handler #?(:clj  #(answer backend opts %)
+                      :cljs #(.then (ring/buffered % (:max-xml-bytes opts))
+                                    (fn [request] (answer backend opts request))))))))

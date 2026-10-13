@@ -155,10 +155,12 @@ it writable, and `:copy!` and `:move!` when your storage copies and moves
 faster than the handler can by itself. The docstring of the `server`
 namespace describes each function and the keys of a resource map.
 
-On the JVM, `:put!` gets the body of the request as a stream, so a
-backend can write a large file as it comes. A document whose resource
-map has its `:content-length` also answers a GET of a range of bytes,
-e.g. for a video player that seeks.
+`:put!` gets the body of the request as a stream, so a backend can write
+a large file as it comes: an InputStream on the JVM, and a ReadableStream
+in ClojureScript. To keep the whole body in memory, read it with
+`server/body-bytes`. A document whose resource map has its
+`:content-length` also answers a GET of a range of bytes, e.g. for a
+video player that seeks.
 
 The handler checks every precondition before it calls a function. A
 function refuses with an ex-info, e.g. when a quota is full:
@@ -195,8 +197,6 @@ Not yet
 
 - **WebDAV Sync** ([RFC 6578](https://www.rfc-editor.org/rfc/rfc6578)),
   which CalDAV and CardDAV clients use to fetch only what changed.
-- **Streaming in ClojureScript.** In Node, the adapter must read the body
-  of a PUT before the handler gets it.
 - **CalDAV and CardDAV,** which would be libraries of their own on top of
   this one.
 
