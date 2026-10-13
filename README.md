@@ -38,7 +38,7 @@ It requires Clojure 1.11+ and Java 11+. Add it from
 your [`deps.edn`](https://clojure.org/guides/deps_and_cli):
 
 ```clojure
-dk.simongray/webdav-clj {:mvn/version "0.1.0"}
+dk.simongray/webdav-clj {:mvn/version "0.1.1"}
 ```
 
 For unreleased changes, depend on the latest commit on `master` instead.
