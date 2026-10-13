@@ -65,6 +65,25 @@
          (expect h (ring :put "/dav/x%00.edn" :body "x") {:status 400})
          (expect h (ring :put "/dav/a%2Fb" :body "x") {:status 400}))))
 
+(deftest above-the-root
+  (let [h (server/handler (memory/backend) {:root "/a%20b/dav/" :locks (atom {}) :compliance ["x"]})]
+    (run (expect h (ring :options "/")
+                 {:status 200 :headers {"DAV" "1, 2, x" "Allow" "OPTIONS, PROPFIND"}})
+         (expect h (ring :propfind "/" :headers {"Depth" "1"})
+                 #(do (is (= 207 (:status %)))
+                      (is (= #{"/" "/a%20b/"} (set (keys (multistatus %)))))
+                      (is (= [:dav/resourcetype {} [:dav/collection {}]]
+                             (:dav/resourcetype (props % "/a%20b/" 200))))))
+         (expect h (ring :propfind "/a%20b" :headers {"Depth" "1"})
+                 #(is (= #{"/a%20b/" "/a%20b/dav/"} (set (keys (multistatus %))))))
+         (expect h (ring :propfind "/a%20b/" :headers {"Depth" "0"} :body (propfind-body :dav/getetag))
+                 #(is (= {:dav/getetag [:dav/getetag {}]} (props % "/a%20b/" 404))))
+         (expect h (ring :propfind "/" :headers {"Depth" "infinity"}) {:status 403})
+         (expect h (ring :get "/") {:status 404})
+         (expect h (ring :proppatch "/a%20b/") {:status 404})
+         (expect h (ring :options "/b/") {:status 404})
+         (expect h (ring :propfind "/a%20b/dav/" :headers {"Depth" "0"}) {:status 207}))))
+
 (deftest putting-and-getting
   (let [a (atom {})
         h (share a)]

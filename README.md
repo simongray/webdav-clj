@@ -186,7 +186,9 @@ The options of `server/handler`, listed in `server/default-options`, set
 the limits, the share's public host name behind a proxy, the aliases of
 namespaces, live properties of your own (e.g. the principal of RFC 5397)
 and methods of your own, such as the REPORT of CalDAV. The handler checks
-no credentials, so mount it behind your login.
+no credentials, so mount it behind your login. Windows sends OPTIONS and
+PROPFIND to `/` and to each collection above the share before it maps
+it, so when the share isn't at `/`, route those to the handler too.
 
 Not yet
 -------

@@ -1059,6 +1059,38 @@
         :unlock    (unlock-response ctx)
         (unknown-response ctx)))))
 
+(defn- above-root
+  "The segments of the percent-encoded path `uri` when it's a collection
+  above the `root` of the share, e.g. [] for / when the root is /dav/, or
+  else nil."
+  [root uri]
+  (let [above (paths/segments (str uri))
+        root  (paths/segments root)]
+    (when (and (vector? above) (< (count above) (count root)) (paths/within? above root))
+      above)))
+
+;; Windows sends OPTIONS and PROPFIND to / and to each collection above a
+;; share before it maps the share
+(defn- above-response
+  "The answer to the request of `ctx` for the collection at the `segments`
+  above the root of the share: OPTIONS, and a PROPFIND of a bare collection
+  whose one member leads to the root. Any other method gets a 404."
+  [{:keys [request opts] :as ctx} segments]
+  (let [root (paths/segments (:root opts))]
+    (case (:request-method request)
+      :options  (assoc-in (options-response ctx) [:headers "Allow"] "OPTIONS, PROPFIND")
+      :propfind (propfind-response
+                 (assoc ctx
+                        :backend  {:resource (constantly {:collection? true})
+                                   :children (fn [path]
+                                               (when-let [name (get root (count path))]
+                                                 [{:name name :collection? true}]))}
+                        :opts     (assoc opts :root "/" :live-properties {} :locks nil)
+                        :path     segments
+                        :resource {:collection? true}
+                        :locks    []))
+      (not-found))))
+
 (defn- answer
   "The answer to the Ring `request` from the `backend`, by the handler's
   `opts`."
@@ -1074,7 +1106,9 @@
                  :locks     (some-> (:locks opts) deref vals (locks/live now))
                  :submitted (submitted request)}]
     (cond
-      (nil? path)       (not-found)
+      (nil? path)       (if-let [above (above-root (:root opts) (:uri request))]
+                          (above-response ctx above)
+                          (not-found))
       (= :invalid path) (ring/text 400 "The path has a segment that can't name a resource")
       :else
       (async/then (ring/attempt #(async/then (resource-at ctx path)
@@ -1090,7 +1124,10 @@
   default-options. The namespace's docstring describes a backend.
 
   Mount it for the :root and every path below it. It checks no
-  credentials, so mount it behind your login. It takes the arguments of a
+  credentials, so mount it behind your login. Windows sends OPTIONS and
+  PROPFIND to / and to each collection above the root before it maps a
+  share, so route those to the handler too, which answers them as for a
+  bare collection. It takes the arguments of a
   synchronous and of an asynchronous handler, and in ClojureScript it
   returns a promise of the response, whose body must be a string or bytes.
 

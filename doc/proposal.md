@@ -243,6 +243,11 @@ since RFC 4918 leaves that GET to the server and a browser is what
 usually sends it. The page has no ETag, because a backend's ETag of a
 collection needn't change when its members do.
 
+**Above its root, the handler answers OPTIONS and PROPFIND** as for a
+bare collection whose one member leads to the root, since Windows asks
+there before it maps a share. Any other method gets a 404, since nothing
+of the share is there.
+
 ### The files backend
 
 `files/backend` serves a directory on the JVM, so a share takes a few
@@ -601,8 +606,6 @@ Nice-to-haves
   of a PUT first. Node's streams would need a body of their own.
 - **Accepting Windows' Win32 properties** in a backend without dead
   properties, so that Explorer copies without an error.
-- **An answer to OPTIONS and PROPFIND at `/`** for Windows, when the
-  share is mounted elsewhere, e.g. at `/dav/`.
 - **The Content-Range of a partial PUT** (Apache's extension), which
   rclone and Cyberduck use for resumable uploads.
 
