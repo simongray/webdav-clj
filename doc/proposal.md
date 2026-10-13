@@ -425,6 +425,18 @@ webdav-clj:
    each element on a line of its own, so a dead property whose value was
    `<a/><b/>` came back with line breaks between them.
 
+0.6.0 took two more, which the security pass found:
+
+1. `emit` refuses a name that isn't an XML name, so a property name from
+   a user can't add elements to a PROPPATCH.
+2. A :doctype of :refuse refuses a DTD, whose entities can make a small
+   body expand into a large one, and lifts the JDK's limits on entities,
+   which counted each `&gt;` and stopped a large listing from parsing.
+
+**wary-fetch** 0.9.0 refuses a header value that HTTP doesn't allow,
+e.g. a token that ends in a newline, before the JDK can show the value
+in an exception.
+
 **wary-fetch** has a reader of HTTP dates in `wary-fetch.date`, which is
 marked `^:no-doc`. webdav-clj uses it anyway and writes the dates itself.
 Making it public, with a writer, would make that a supported dependency.
