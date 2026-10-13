@@ -648,6 +648,30 @@ write:
   opaquelocktoken, and a document's lock has the depth infinity that the
   LOCK asked for.
 
+### macOS's WebDAV client
+
+On 13 October 2026, `mount_webdav`, the client that Finder uses
+(WebDAVFS 3.0.0), mounted the files backend on Jetty with a lock table.
+Through the mount, files were written, appended to, read, renamed
+between folders, copied, given an extended attribute and deleted. A 20
+MB file came back byte for byte, a name in NFD read back, and every
+answer was a success, apart from 404s for files that macOS looks for,
+such as `.DS_Store`.
+
+The client locks each file before it writes, exclusively for ten
+minutes, sends the token in an If header and unlocks when it's done. It
+keeps extended attributes in `._` files beside each file, as on any
+WebDAV server.
+
+The first mount hung, and that found a defect. On macOS,
+`toRealPath(NOFOLLOW_LINKS)`, which the backend used to tell a name on
+disk from an alias, lists every directory on the way and looks at each
+entry. It waited on the mount beside the share, which waited on the
+server, and it made a listing of n files cost n² lookups: a PROPFIND of
+2,000 files spent 20 seconds in it. The backend now follows the links
+with one `toRealPath`, which gives the names as they are on disk too,
+and the same listing takes a tenth of a second.
+
 
 Nice-to-haves
 -------------

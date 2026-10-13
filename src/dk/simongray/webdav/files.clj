@@ -63,18 +63,19 @@
 ;; ignores case, .WEBDAV for the backend's own directory, or a symbolic
 ;; link, makes two resources of one file for the handler, so that a MOVE
 ;; from one to the other deletes the file as the destination it
-;; overwrites. A link can also lead out of the directory. The two Unicode
-;; forms of a name are one name, which Java on macOS gives in NFC.
+;; overwrites. A link can also lead out of the directory. The real path
+;; follows the links and has the names as they're on disk, and Java on
+;; macOS gives them in NFC. Without following links, toRealPath lists each
+;; directory on the way on macOS, which can wait forever on a mount there.
 (defn- own-name?
   "Whether the file `f` below the directory `root`, or its directory when
   it isn't there, has that name on disk, with no symbolic link on the way."
   [^Path root ^Path f]
-  (let [no-links (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])
-        existing (if (Files/exists f no-links) f (.getParent f))
-        on-disk  (.toRealPath existing no-links)
+  (let [existing (if (Files/exists f (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                   f
+                   (.getParent f))
         nfc      #(Normalizer/normalize (str (.relativize root ^Path %)) Normalizer$Form/NFC)]
-    (and (= (nfc existing) (nfc on-disk))
-         (= on-disk (.toRealPath existing (make-array LinkOption 0))))))
+    (= (nfc existing) (nfc (.toRealPath existing (make-array LinkOption 0))))))
 
 (defn- file-of
   "The file of the share's `path` below the directory `root`, or nil when
