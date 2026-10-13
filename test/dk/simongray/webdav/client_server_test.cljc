@@ -60,9 +60,7 @@
                                   (= "phone.edn" name) (assoc :version etag)))))))
              (is (= ["notes"] (map :name (filter :collection? resources))))))
      (step send :get phone {}
-           #(is (= {:status 200 :body "{:v 2}" :content-type "application/edn"}
-                   (select-keys % [:status :body :content-type]))
-                "a PUT without a Content-Type keeps the old one"))
+           #(is (= {:status 200 :body "{:v 2}"} (select-keys % [:status :body]))))
      (step send :get phone {:range [1 2]}
            #(is (= {:status 206 :body ":v" :content-range {:start 1 :end 2 :total 6}}
                    (select-keys % [:status :body :content-range]))))

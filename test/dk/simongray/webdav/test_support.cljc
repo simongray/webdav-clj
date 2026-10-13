@@ -82,12 +82,16 @@
   (fn []
     (let [request (if (fn? request) (request) request)]
       (async/then (handler request)
-                  (fn [response]
-                    (if (fn? expected)
-                      (expected response)
-                      (is (matches? response expected)
-                          (str (name (:request-method request)) " " (:uri request)
-                               " gave " (pr-str (update response :body text))))))))))
+                  ;; a stream can be read once, so it's read here
+                  (fn [{:keys [body] :as streamed}]
+                    (let [response (cond-> streamed
+                                     #?(:clj (instance? java.io.InputStream body) :cljs false)
+                                     (assoc :body (body-bytes body)))]
+                      (if (fn? expected)
+                        (expected response)
+                        (is (matches? response expected)
+                            (str (name (:request-method request)) " " (:uri request)
+                                 " gave " (pr-str (update response :body text)))))))))))
 
 (defn share
   "A handler at /dav/ over a new memory backend in the atom `a`, with the

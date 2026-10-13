@@ -238,6 +238,26 @@ can serve WebDAV with the same code.
 **The handler answers at once.** Nothing runs in the background, and
 nothing needs starting or stopping.
 
+### The files backend
+
+`files/backend` serves a directory on the JVM, so a share takes a few
+lines, and litmus tests a real file system as well as memory.
+
+- **Dead properties live in a `.webdav` directory at the top,** one XML
+  file per resource in a tree that mirrors the share. Files beside each
+  resource would show up for every other program that reads the
+  directory, and extended attributes differ between macOS and Linux and
+  get lost when tools copy files.
+- **A PUT writes to a temporary file and moves it into place,** so a body
+  that's refused or broken off leaves the old file as it was.
+- **An ETag is the size and the time of the last change,** since hashing
+  every file for a PROPFIND would read the whole share. Two writes of the
+  same size within one tick of the clock share an ETag.
+- **A MOVE renames, and a COPY goes through the handler,** which copies
+  the dead properties too.
+- **A symbolic link that leads out of the directory counts as nothing,**
+  so a link can't publish the rest of the disk.
+
 ### Dead and live properties
 
 The handler computes the live properties of RFC 4918 from the resource
@@ -500,15 +520,16 @@ Docker wasn't running here, so `dev/litmus.sh` builds it from source:
    [notroj.github.io/litmus](https://notroj.github.io/litmus/), checks
    its SHA-256 and builds it with its own copy of neon, without TLS, into
    `target/litmus`.
-2. It starts the handler over a memory backend and a lock table on Jetty
-   at `http://localhost:8765/dav/` with `clojure -M:litmus`.
-3. It runs the basic, copymove, props, locks and http suites and stops
-   the server.
+2. It starts the handler with a lock table on Jetty at
+   `http://localhost:8765/dav/` with `clojure -M:litmus`, first over a
+   memory backend and then over a new temporary directory.
+3. It runs the basic, copymove, props, locks and http suites against
+   each and stops the server.
 
 To repeat the run, install a C compiler (the Xcode command-line tools on
 macOS) and run `dev/litmus.sh`. It takes about 20 seconds, and the CI
 workflow runs it too. On 13 October 2026, with Jetty 12.1.0 on Java 24
-and macOS, every suite passed without a warning:
+and macOS, every suite passed without a warning over both backends:
 
 | Suite | Result |
 |---|---|
@@ -518,8 +539,8 @@ and macOS, every suite passed without a warning:
 | http | 4 of 4 passed |
 | locks | 40 of 40 passed |
 
-The memory backend has a `:move!` of its own but no `:copy!`, so litmus
-tests the handler's own copying, dead properties included.
+Neither backend has a `:copy!`, so litmus tests the handler's own
+copying, dead properties included.
 
 ### Local tests
 
@@ -529,6 +550,8 @@ tests the handler's own copying, dead properties included.
 - **The handler,** method by method over the memory backend, with the
   litmus cases that don't need a network, and its locks: of documents and
   collections, shared and exclusive, by principal and until they expire.
+- **The files backend,** with the client's scenario and the handler's
+  copies and moves over a directory, and what it keeps out of reach.
 - **The client against the handler,** in-process on every platform, and
   over HTTP on the JVM through `com.sun.net.httpserver`, which Java 11
   has, so the floor job needs no Jetty.
@@ -571,9 +594,6 @@ Nice-to-haves
 
 - **Streaming in ClojureScript,** where the adapter must read the body
   of a PUT first. Node's streams would need a body of their own.
-- **A backend over the file system** on the JVM, with dead properties in
-  a file beside each resource. It would make a share in a few lines and
-  be the obvious backend for litmus too.
 - **A plain HTML index** for GET on a collection, which answers 405
   today.
 - **Accepting Windows' Win32 properties** in a backend without dead

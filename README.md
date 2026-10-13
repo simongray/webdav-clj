@@ -110,17 +110,22 @@ ETag.
 Serving a share
 ---------------
 
-`server/handler` serves a backend over WebDAV. The memory backend is
-there for tests and examples:
+`server/handler` serves a backend over WebDAV. On the JVM the files
+backend serves a directory:
 
 ```clojure
-(require '[dk.simongray.webdav.memory :as memory]
+(require '[dk.simongray.webdav.files :as files]
          '[dk.simongray.webdav.server :as server]
          '[ring.adapter.jetty :as jetty])
 
-(jetty/run-jetty (server/handler (memory/backend) {:root "/dav/"})
+(jetty/run-jetty (server/handler (files/backend "/srv/share") {:root "/dav/"})
                  {:port 8080 :join? false})
 ```
+
+It keeps the dead properties and the bodies that are being written in a
+`.webdav` directory of its own, which no request reaches. The memory
+backend in `dk.simongray.webdav.memory` serves an atom instead, on every
+platform, e.g. for tests.
 
 A backend of your own is a map of functions of a path, a vector of
 decoded segments below the root. Only `:resource` is required, so this
@@ -205,10 +210,11 @@ dev/record.sh                         # the answers of Nextcloud and mod_dav, fo
 ```
 
 The litmus script downloads litmus 0.18, builds it into `target/litmus`
-(which needs a C compiler), and runs its suites against the handler over
-a memory backend on Jetty. The record script runs Nextcloud and Apache's
-mod_dav in Docker and records their answers into `test/resources`. The
-design and its reasons are in [doc/proposal.md](doc/proposal.md).
+(which needs a C compiler), and runs its suites against the handler on
+Jetty, over the memory backend and over a directory. The record script
+runs Nextcloud and Apache's mod_dav in Docker and records their answers
+into `test/resources`. The design and its reasons are in
+[doc/proposal.md](doc/proposal.md).
 
 License
 -------

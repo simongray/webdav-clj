@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run litmus, the WebDAV test suite of the neon project, against the
-# handler over a memory backend on Jetty.
+# handler with locks on Jetty, over the memory backend and then over a
+# new directory.
 #
 #     dev/litmus.sh           # every suite
 #     dev/litmus.sh props     # some of them
@@ -30,17 +31,23 @@ if [ ! -x "$dir/litmus-$version/props" ]; then
      make > make.log 2>&1)
 fi
 
-clojure -M:litmus "$port" > "$dir/server.log" 2>&1 &
-server=$!
-trap 'kill $server 2> /dev/null' EXIT
-
-for _ in $(seq 1 120); do
-  curl -sf -o /dev/null -X OPTIONS "$url" && break
-  sleep 1
-done
+server=
+trap '[ -n "$server" ] && kill $server 2> /dev/null' EXIT
 
 failed=0
-for suite in ${suites[*]}; do
-  (cd "$dir/litmus-$version" && "./$suite" -n "$url") || failed=1
+for backend in memory files; do
+  echo "-> over the $backend backend"
+  clojure -M:litmus "$port" "$backend" > "$dir/server-$backend.log" 2>&1 &
+  server=$!
+  for _ in $(seq 1 120); do
+    curl -sf -o /dev/null -X OPTIONS "$url" && break
+    sleep 1
+  done
+  for suite in ${suites[*]}; do
+    (cd "$dir/litmus-$version" && "./$suite" -n "$url") || failed=1
+  done
+  kill $server
+  wait $server 2> /dev/null || true
+  server=
 done
 exit $failed

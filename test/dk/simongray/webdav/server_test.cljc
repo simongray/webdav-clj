@@ -288,7 +288,7 @@
          (expect h (ring :put "/dav/c/a.txt" :body "a") {:status 201})
          (expect h (ring :mkcol "/dav/c/a.txt") {:status 405}))))
 
-(defn- copying-and-moving
+(defn copying-and-moving
   "The steps that copy and move over the handler `h`."
   [h]
   [(expect h (ring :mkcol "/dav/src/") {:status 201})
