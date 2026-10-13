@@ -7,7 +7,7 @@
   with its :body as bytes and its dead :props by name, and the last
   number that an ETag was made of as :etags."
   (:require [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]
+            [dk.simongray.webcrypto.bytes :as bytes]
             [dk.simongray.webdav.impl.ring :as ring]
             [dk.simongray.webdav.paths :as paths]))
 

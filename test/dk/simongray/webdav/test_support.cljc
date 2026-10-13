@@ -8,7 +8,7 @@
             [clojure.test :refer [is #?(:cljs async)]]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]
+            [dk.simongray.webcrypto.bytes :as bytes]
             [dk.simongray.webdav.memory :as memory]
             [dk.simongray.webdav.server :as server]
             [dk.simongray.whatwg-url :as url]))

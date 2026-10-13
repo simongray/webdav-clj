@@ -2,12 +2,14 @@
 
  ;; Clojure 1.11 is the floor, and the tests run on it unless an alias says
  ;; otherwise. wary-fetch sends the requests of the client, qname-hiccup
- ;; reads and writes the XML bodies, and whatwg-url parses the hrefs and
- ;; percent-encodes their paths.
- :deps  {org.clojure/clojure       {:mvn/version "1.11.4"}
-         dk.simongray/wary-fetch   {:mvn/version "0.10.0"}
-         dk.simongray/qname-hiccup {:mvn/version "0.6.0"}
-         dk.simongray/whatwg-url   {:mvn/version "0.1.0"}}
+ ;; reads and writes the XML bodies, whatwg-url parses the hrefs and
+ ;; percent-encodes their paths, and webcrypto-clj has the bytes of the
+ ;; bodies.
+ :deps  {org.clojure/clojure        {:mvn/version "1.11.4"}
+         dk.simongray/wary-fetch    {:mvn/version "0.11.0"}
+         dk.simongray/qname-hiccup  {:mvn/version "0.6.0"}
+         dk.simongray/whatwg-url    {:mvn/version "0.1.0"}
+         dk.simongray/webcrypto-clj {:mvn/version "0.1.0"}}
 
  :aliases
  {;; clojure -X:test

@@ -3,7 +3,7 @@
   both platforms."
   (:require [clojure.string :as str]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes])
+            [dk.simongray.webcrypto.bytes :as bytes])
   #?(:clj (:import [java.io ByteArrayInputStream FilterInputStream InputStream]
                    [java.util Arrays])))
 

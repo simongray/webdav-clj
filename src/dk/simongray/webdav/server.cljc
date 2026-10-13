@@ -66,7 +66,7 @@
   (:require [clojure.string :as str]
             [dk.simongray.qname-hiccup :as qh]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]
+            [dk.simongray.webcrypto.bytes :as bytes]
             [dk.simongray.webdav.conditions :as conditions]
             [dk.simongray.webdav.impl.copy :as copy]
             [dk.simongray.webdav.impl.dates :as dates]

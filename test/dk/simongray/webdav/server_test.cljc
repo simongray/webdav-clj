@@ -4,7 +4,7 @@
   (:require #?(:cljs [dk.simongray.webdav.test-setup])
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [dk.simongray.wary-fetch.bytes :as bytes]
+            [dk.simongray.webcrypto.bytes :as bytes]
             [dk.simongray.webdav.memory :as memory]
             [dk.simongray.webdav.server :as server]
             [dk.simongray.webdav.test-support :refer [body-bytes expect ring run share text]]
