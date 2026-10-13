@@ -278,14 +278,16 @@ number, as like-minded's numbered stores do.
 
 qname-hiccup reads and writes every body. Its `uri->alias` table can be
 a function, which the library uses to give every namespace a keyword: an
-alias from the table, or else the URI itself. Before writing, the library
-swaps each URI for a generated prefix (`ns1`, `ns2` and so on) and hands
-qname-hiccup the table of prefixes.
+alias from the table, or else the URI itself. When it writes, qname-hiccup
+gives each URI a prefix of its own (`ns1`, `ns2` and so on), and it
+writes the document on one line, so that a dead property's value reads
+back as it was.
 
-A body is refused with a 400 when qname-hiccup throws, and also when its
-report has an undeclared prefix or a prefix bound to an empty URI, which
-Namespaces in XML forbids and litmus tests. The parser's limits (no
-external entities, nesting at most 256 deep) apply to every body.
+A body is refused with a 400 when qname-hiccup throws, e.g. for a prefix
+bound to an empty URI, which Namespaces in XML forbids and litmus tests.
+It's refused too when its report has an undeclared prefix. The parser's
+limits (no external entities, nesting at most 256 deep) apply to every
+body.
 
 ### Safety defaults
 
@@ -318,18 +320,18 @@ external entities, nesting at most 256 deep) apply to every body.
 Changes to other libraries
 --------------------------
 
-**qname-hiccup** works as it is, but four changes would remove code
-from webdav-clj:
+**qname-hiccup** 0.5.0 took four changes, which removed code from
+webdav-clj:
 
-1. Document that `uri->alias` can be a function, which the code already
-   allows.
-2. An option for `emit` to generate prefixes for keyword namespaces that
-   aren't aliases, e.g. URIs. webdav-clj does this itself before writing.
-3. Treat a prefix bound to an empty URI as malformed, as section 3 of
-   Namespaces in XML says, rather than reporting an unknown namespace.
-4. An :indent of nil to write a document on one line. Today `emit` puts
-   each element on a line of its own, so a dead property whose value is
-   `<a/><b/>` comes back with line breaks between them.
+1. `uri->alias` can be a function, and the empty URI of no namespace is
+   never looked up in it.
+2. `emit` gives a keyword namespace with a colon, i.e. a URI, a prefix of
+   its own.
+3. A prefix bound to an empty URI is malformed, as section 3 of
+   Namespaces in XML says, rather than an unknown namespace.
+4. An :indent of false writes a document on one line. Before, `emit` put
+   each element on a line of its own, so a dead property whose value was
+   `<a/><b/>` came back with line breaks between them.
 
 **wary-fetch** has a reader of HTTP dates in `wary-fetch.date`, which is
 marked `^:no-doc`. webdav-clj uses it anyway and writes the dates itself.
@@ -564,7 +566,8 @@ The questions of this proposal, as Simon settled them on 13 October
    and mod_dav, which cost nothing. Fastmail and Hetzner wait.
 6. **qname-hiccup changes first,** at least writing on one line and
    generating prefixes, so that webdav-clj's release doesn't carry its
-   own prefix code and dead properties keep their exact values.
+   own prefix code and dead properties keep their exact values. They
+   came in qname-hiccup 0.5.0, which webdav-clj now takes.
 7. **like-minded's `handler` keeps its signature** and passes
    :propfind-infinity? true, so the podcast server needs no change.
 8. **The Destination's host is compared,** as RFC 4918 requires, with

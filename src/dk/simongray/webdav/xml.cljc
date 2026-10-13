@@ -18,8 +18,7 @@
 
 (defn- uri->alias
   "The function that gives each namespace URI its keyword namespace by
-  `namespaces`: the alias, the URI itself, or nil for the empty URI of no
-  namespace.
+  `namespaces`: the alias, or else the URI itself.
 
   A URI that's also the name of an alias, e.g. dav, would pass for that
   alias's namespace, so it throws. Namespaces in XML deprecates such
@@ -30,19 +29,16 @@
     (fn [uri]
       (cond
         (contains? table uri)   (table uri)
-        (= "" uri)              nil
         (contains? aliases uri) (throw (ex-info "A namespace URI is the name of an alias"
                                                 {:type ::malformed :uri uri}))
         :else                   uri))))
 
-;; Namespaces in XML 1.0, section 3: a prefix can't be bound to the empty
-;; URI, and a prefix must be declared
+;; Namespaces in XML 1.0, section 3: a prefix must be declared
 (defn- malformed-namespace?
   "Whether a `problem` that qname-hiccup reports makes a document
   malformed."
-  [{:keys [id uri] :as problem}]
-  (or (= :xml/undeclared-prefix id)
-      (and (= :xml/unknown-namespace id) (= "" uri))))
+  [{:keys [id] :as problem}]
+  (= :xml/undeclared-prefix id))
 
 (defn- without-xmlns
   "The `tree` without the :xmlns attributes that undeclare a default
@@ -78,53 +74,9 @@
   [x]
   (and (vector? x) (keyword? (first x))))
 
-(defn- rename
-  "The Hiccup `x` with each keyword of an element's tag and attributes
-  replaced by what `f` gives for it. Hiccup as renderers take it is fine
-  too, e.g. an element without attributes or a sequence of children."
-  [f x]
-  (cond
-    (element? x)
-    (let [[tag & more]  x
-          [attrs & kids] (if (map? (first more)) more (cons {} more))]
-      (into [(f tag) (update-keys attrs f)] (map #(rename f %)) kids))
-
-    (seq? x)
-    (map #(rename f %) x)
-
-    :else
-    x))
-
-(defn- keyword-namespaces
-  "The namespaces of the keywords of the elements and attributes in the
-  Hiccup `x`."
-  [x]
-  (cond
-    (element? x)
-    (let [[tag & more] x
-          attrs        (when (map? (first more)) (first more))]
-      (into (set (keep namespace (cons tag (keys attrs))))
-            (mapcat keyword-namespaces)
-            more))
-
-    (seq? x)
-    (into #{} (mapcat keyword-namespaces) x)
-
-    :else
-    #{}))
-
-(defn- prefixes
-  "The prefix of each URI among the keyword namespaces `used`, given that
-  `aliases` are the aliases of the table: ns1, ns2 and so on, in the order
-  of the URIs."
-  [used aliases]
-  (let [uris (->> used
-                  (remove #(or (= "xml" %) (contains? aliases (keyword %))))
-                  sort)]
-    (zipmap uris (map #(keyword (str "ns" %)) (iterate inc 1)))))
-
 (defn emit
-  "The XML text of the Hiccup `tree`, with names by `namespaces`.
+  "The XML text of the Hiccup `tree` on one line, with names by
+  `namespaces`, so that a property's value reads back as it was.
 
   Each alias in use is declared on the root element, and each URI used as
   a keyword namespace gets a prefix of its own, e.g. ns1. A name in no
@@ -132,16 +84,9 @@
   ([tree]
    (emit tree nil))
   ([tree namespaces]
-   (let [alias->uri (set/map-invert (merge default-namespaces namespaces))
-         used       (keyword-namespaces tree)
-         generated  (prefixes used alias->uri)
-         rename-1   (fn [k]
-                      (if-let [prefix (some-> (namespace k) generated)]
-                        (keyword (name prefix) (name k))
-                        k))
-         declared   (merge (select-keys alias->uri (map keyword used))
-                           (set/map-invert generated))]
-     (qh/emit (rename rename-1 tree) declared))))
+   (qh/emit tree
+            (set/map-invert (merge default-namespaces namespaces))
+            {:indent false})))
 
 (defn clark
   "The name `k` in Clark notation, e.g. {DAV:}getetag for :dav/getetag,
