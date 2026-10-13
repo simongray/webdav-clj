@@ -158,6 +158,9 @@
     (is (= {:status 404 :name "gone.md"} (select-keys gone [:status :name])))))
 
 (deftest other-answers
+  (testing "a multistatus that can't be read"
+    (is (= {:status 207 :malformed? true}
+           (webdav/parse-response (webdav/request :propfind root {}) (response 207 "<D:multistatus")))))
   (testing "PROPPATCH"
     (let [patched   #(first (:resources (webdav/parse-response (webdav/request :proppatch root {:patch [] :namespaces owncloud})
                                                                (response 207 %))))
@@ -211,3 +214,43 @@
   (testing "PUT"
     (is (= {:status 201 :etag "\"v2\""}
            (webdav/parse-response (webdav/request :put root) {:status 201 :headers {"etag" ["\"v2\""]}})))))
+
+(defn- listed
+  "The resource that a 207 to a PROPFIND of root gives for the `href`."
+  [href]
+  (first (:resources (webdav/parse-response
+                      (webdav/request :propfind root)
+                      (response 207 (str "<D:multistatus xmlns:D='DAV:'><D:response><D:href>" href
+                                         "</D:href><D:status>HTTP/1.1 200 OK</D:status>"
+                                         "</D:response></D:multistatus>"))))))
+
+(deftest a-server-that-lies
+  (testing "a URL on another origin, which the credentials of root mustn't reach"
+    (is (= (str root "a.txt") (:url (listed "a.txt"))))
+    (doseq [href ["https://evil.example/a.txt" "//evil.example/a.txt" "http://cloud.example.org/a.txt"
+                  "javascript:alert(1)" "file:///etc/passwd"]]
+      (is (not (contains? (listed href) :url)) href)))
+  (testing "a name that can't name a file"
+    (is (= "a b.txt" (:name (listed "/x/a%20b.txt"))))
+    (doseq [href ["/dav/..%2F..%2F.ssh%2Fauthorized_keys" "/dav/a%5Cb" "/dav/a%00b"]]
+      (is (not (contains? (listed href) :name)) href)))
+  (testing "a lock scope as text, and a refresh among the locks of others"
+    (let [discovery (str "<D:prop xmlns:D='DAV:'><D:lockdiscovery>"
+                         "<D:activelock><D:lockscope>exclusive</D:lockscope>"
+                         "<D:locktoken><D:href>urn:uuid:other</D:href></D:locktoken></D:activelock>"
+                         "<D:activelock><D:lockscope><D:shared/></D:lockscope>"
+                         "<D:locktoken><D:href>urn:uuid:mine</D:href></D:locktoken></D:activelock>"
+                         "</D:lockdiscovery></D:prop>")]
+      (is (= {:token "urn:uuid:mine" :scope :shared :depth 0}
+             (:lock (webdav/parse-response (webdav/request :lock root {:lock-token "urn:uuid:mine"})
+                                           (response 200 discovery))))))))
+
+(deftest requests-that-are-refused
+  (let [refused #(try (%) nil (catch #?(:clj Exception :cljs :default) e (ex-data e)))]
+    (doseq [url ["https://simon:secret@cloud.example.org/notes/" "file:///etc/passwd" "notes/"]]
+      (is (some? (refused #(webdav/request :get url))) url))
+    (is (not (str/includes? (pr-str (refused #(webdav/request :copy root {:credentials {:username "simon" :password "secret"}})))
+                            "secret"))
+        "an error leaves the password out")
+    (is (some? (refused #(webdav/request :proppatch root {:patch [[:set (keyword "urn:x" "a/><x") "v"]]})))
+        "a name with markup in it")))

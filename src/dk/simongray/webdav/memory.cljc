@@ -1,6 +1,7 @@
 (ns dk.simongray.webdav.memory
-  "A backend that keeps a share in an atom, e.g. for tests, for examples
-  and for litmus.
+  "A backend that keeps a share in an atom, for tests, examples and
+  litmus. It holds every body in memory, so it's no backend for a share
+  that others write to.
 
   The atom holds a map of :resources, from path to a map of the resource
   with its :body as bytes and its dead :props by name, and the last
@@ -116,8 +117,12 @@
                     nil)
     :props        (fn [path]
                     (vals (get-in @a [:resources path :props])))
+    ;; the resource may have gone since the handler found it
     :patch-props! (fn [path ops]
-                    (swap! a update-in [:resources path :props] patched ops)
+                    (swap! a (fn [state]
+                               (cond-> state
+                                 (get-in state [:resources path])
+                                 (update-in [:resources path :props] patched ops))))
                     nil)}))
 
 (comment

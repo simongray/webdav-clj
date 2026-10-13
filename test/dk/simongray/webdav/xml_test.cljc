@@ -28,11 +28,19 @@
   (doseq [s ["<foo>"
              "<prop xmlns='DAV:'><displayname xmlns='dav'/></prop>"
              "<D:propfind xmlns:D=\"DAV:\"><D:prop><bar:foo xmlns:bar=\"\"/></D:prop></D:propfind>"
-             "<D:propfind xmlns:D=\"DAV:\"><bar:foo/></D:propfind>"]]
+             "<D:propfind xmlns:D=\"DAV:\"><bar:foo/></D:propfind>"
+             "<prop xmlns='DAV:'><x:p xmlns:x='foo'/></prop>"
+             "<!DOCTYPE x [<!ENTITY e 'e'>]><x>&e;</x>"
+             (str (char 0xFEFF) "<?xml version='1.0'?> <!-- <x/> --><?pi?>\n<!DOCTYPE x><x/>")]]
     (is (= ::xml/malformed (try (xml/parse s) nil
                                 (catch #?(:clj Exception :cljs :default) e
                                   (:type (ex-data e)))))
-        s)))
+        s))
+  (is (= [:x {} "<!DOCTYPE x>"] (xml/parse "<x><![CDATA[<!DOCTYPE x>]]></x>"))
+      "a document type only counts before the root")
+  (is (= ::xml/malformed (try (xml/parse "<a><b/></a>" nil {:max-depth 1}) nil
+                              (catch #?(:clj Exception :cljs :default) e
+                                (:type (ex-data e)))))))
 
 (deftest writing
   (let [tree [:dav/prop {} [(keyword litmus "a") {:xml/lang "en"} "1"] [:nonamespace {} "v"]

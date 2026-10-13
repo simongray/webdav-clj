@@ -57,11 +57,12 @@
   "The Destination and Overwrite headers of a COPY or MOVE of the resource
   at `url`, by `opts`."
   [url {:keys [destination overwrite?] :as opts}]
-  (when-not destination
-    (throw (ex-info "A COPY or MOVE needs a :destination"
-                    {:type ::invalid :opts opts})))
-  (cond-> {"Destination" (or (url/resolve url destination) destination)}
-    (false? overwrite?) (assoc "Overwrite" "F")))
+  (let [resolved (some->> destination (url/resolve url))]
+    (when-not resolved
+      (throw (ex-info "A COPY or MOVE needs a :destination that's a URL"
+                      {:type ::invalid :destination destination})))
+    (cond-> {"Destination" resolved}
+      (false? overwrite?) (assoc "Overwrite" "F"))))
 
 ;; RFC 4918, sections 10.4 and 10.5
 (defn- lock-token-headers
@@ -83,6 +84,19 @@
            [:dav/lockscope {} [(keyword "dav" (name scope)) {}]]
            [:dav/locktype {} [:dav/write {}]]]
     owner (conj (xml/property :dav/owner owner))))
+
+;; as fetch does, so that a password goes in :credentials, which stays out
+;; of the URLs of resources and of error messages
+(defn- check-url!
+  "Throw unless the `url` is an http or https URL without credentials."
+  [url]
+  (cond
+    (not (#{"http" "https"} (url/scheme url)))
+    (throw (ex-info "A request goes to an http or https URL" {:type ::invalid :url url}))
+
+    (or (seq (url/username url)) (seq (url/password url)))
+    (throw (ex-info "A URL with credentials in it can't be requested; give them as :credentials"
+                    {:type ::invalid}))))
 
 ;; RFC 4918, section 10.7
 (defn- timeout-header
@@ -134,6 +148,7 @@
   ([method url]
    (request method url {}))
   ([method url {:keys [namespaces body as] :as opts}]
+   (check-url! url)
    (let [method  (keyword (str/lower-case (name method)))
          opts    (cond-> opts
                    (and (= :propfind method) (nil? (:depth opts))) (assoc :depth 0))
@@ -141,7 +156,8 @@
                                              :url     url
                                              :headers (common-headers opts)}
                            opts)
-                   (:lock-token opts) (update :headers merge (lock-token-headers method opts))
+                   (:lock-token opts) (-> (update :headers merge (lock-token-headers method opts))
+                                          (assoc :lock-token (:lock-token opts)))
                    (seq namespaces)   (assoc :namespaces namespaces)
                    as                 (assoc :as as)
                    (:range opts)      (assoc :range (:range opts)))]
@@ -231,8 +247,11 @@
   "The resource map of a `response` of a multistatus, as xml/read-multistatus
   returns it, to a request of `url`. It has:
 
-  - :href as the server wrote it, :url resolved against `url`, and
-    :name, the decoded last segment
+  - :href as the server wrote it, and :url, resolved against `url`, when
+    it's on the same origin, since a request to it would carry the same
+    credentials
+  - :name, the decoded last segment, when it can name a file, so not e.g.
+    ../x
   - :props, the values of the properties that came back with a success,
     by name, as xml/value gives them
   - :failed, the status of each property that didn't, by name, e.g. 404
@@ -251,11 +270,12 @@
         failed (into {} (for [{:keys [status props]} propstats
                               :when (not (success? status))
                               element                props]
-                          [(first element) status]))]
-    (cond-> (with-live-keys {:href  href
-                             :url   (or (url/resolve url href) href)
-                             :name  (paths/name href)
-                             :props props}
+                          [(first element) status]))
+        resolved (url/resolve url href)
+        segment  (paths/name href)]
+    (cond-> (with-live-keys (cond-> {:href href :props props}
+                              (url/same-origin? url resolved) (assoc :url resolved)
+                              (paths/segment? segment)        (assoc :name segment))
               props)
       status       (assoc :status status)
       (seq failed) (assoc :failed failed)
@@ -306,18 +326,22 @@
       (assoc :last-modified (dates/parse-http-date (headers/header headers "last-modified"))))))
 
 ;; RFC 4918, sections 9.10.6 and 10.5
+;; a refresh has no Lock-Token header, and the lock it refreshed can share
+;; the DAV:lockdiscovery with the locks of others
 (defn- taken-lock
-  "The lock that the `response` to a LOCK took or refreshed: the one of
-  its Lock-Token header, or else the first in its DAV:lockdiscovery, read
-  by `namespaces`."
-  [{:keys [headers] :as response} namespaces]
+  "The lock that the `response` to a LOCK took or refreshed, read by
+  `namespaces`: the one of its Lock-Token header, or else of the
+  `lock-token` that the request refreshed, or else the first in its
+  DAV:lockdiscovery."
+  [{:keys [headers] :as response} lock-token namespaces]
   (let [tree       (parse-xml response namespaces)
         discovered (activelocks (some #(when (and (vector? %) (= :dav/lockdiscovery (first %)))
                                          (xml/value %))
                                       (drop 2 tree)))
-        token      (locks/coded-url (headers/header headers "lock-token"))]
-    (or (some #(when (= token (:token %)) %) discovered)
-        (first discovered))))
+        token      (or (locks/coded-url (headers/header headers "lock-token")) lock-token)]
+    (if token
+      (some #(when (= token (:token %)) %) discovered)
+      (first discovered))))
 
 ;; RFC 4918, section 10.1
 (defn- capabilities
@@ -336,7 +360,8 @@
   Then by the status and the method:
 
   - 207: the :resources, as resource returns them, e.g. of a PROPFIND or
-    of the members that a COPY or a DELETE couldn't change
+    of the members that a COPY or a DELETE couldn't change, or :malformed?
+    true when the body can't be read
   - a success of OPTIONS: the :dav classes and the :allow methods
   - a success of LOCK: the :lock that it took or refreshed, as resource
     gives its :locks
@@ -352,15 +377,15 @@
                  etag (assoc :etag etag))]
     (cond
       (= 207 status)
-      (assoc base :resources (mapv #(resource url %)
-                                   (:responses (some-> (parse-xml response namespaces)
-                                                       xml/read-multistatus))))
+      (if-let [multistatus (some-> (parse-xml response namespaces) xml/read-multistatus)]
+        (assoc base :resources (mapv #(resource url %) (:responses multistatus)))
+        (assoc base :malformed? true))
 
       (and (success? status) (= :options method))
       (merge base (capabilities response))
 
       (and (success? status) (= :lock method))
-      (assoc base :lock (taken-lock response namespaces))
+      (assoc base :lock (taken-lock response (:lock-token request) namespaces))
 
       (and (success? status) (#{:get :head} method))
       (cond-> (merge base (representation response))

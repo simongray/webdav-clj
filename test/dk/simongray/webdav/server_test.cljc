@@ -99,7 +99,10 @@
                  {:status 201 :headers {"ETag" "\"1\""}})
          (expect h (ring :get "/dav/a%20b.txt")
                  {:status  200
-                  :headers {"ETag" "\"1\"" "Content-Type" "text/plain"}
+                  :headers {"ETag"                    "\"1\""
+                            "Content-Type"            "text/plain"
+                            "X-Content-Type-Options"  "nosniff"
+                            "Content-Security-Policy" "sandbox"}
                   :body    "hello"})
          (expect h (ring :head "/dav/a%20b.txt")
                  {:status 200 :headers {"Content-Length" "5"} :body ""})
@@ -114,8 +117,11 @@
          (expect h (ring :put "/dav/") {:status 405})
          (expect h (ring :put "/dav/no/parent.txt" :body "x") {:status 409})
          (expect h (ring :put "/dav/a%20b.txt/c" :body "x") {:status 409})
+         (expect h (ring :get "/dav/cafe%CC%81.txt") {:status 404})
+         (expect h (ring :put "/dav/caf%C3%A9.txt" :body "c") {:status 201})
+         (expect h (ring :get "/dav/cafe%CC%81.txt") {:status 200 :body "c"})
          (fn []
-           (is (= #{[] ["a b.txt"] ["b.bin"]} (set (keys (:resources @a)))))))))
+           (is (= #{[] ["a b.txt"] ["b.bin"] ["café.txt"]} (set (keys (:resources @a)))))))))
 
 (deftest pages-of-collections
   (let [h (share)]
@@ -295,11 +301,28 @@
          (expect h (ring :copy "/dav/a.txt" :headers {"Host"        "127.0.0.1:8080"
                                                       "Destination" "https://dav.example.org/dav/d.txt"})
                  {:status 201})
+         (expect h (ring :copy "/dav/a.txt" :headers {"Host"        "localhost:8080"
+                                                      "Destination" "//other.example/dav/e.txt"})
+                 {:status 502})
+         (expect h (ring :copy "/dav/a.txt" :headers {"Host"        "localhost:8080"
+                                                      "Destination" "\\\\other.example\\dav\\e.txt"})
+                 {:status 502})
          (expect h (ring :copy "/dav/a.txt" :headers {"Destination" "http://[::1/x"}) {:status 400})
          (expect h (ring :copy "/dav/a.txt" :headers {"Destination" "/dav/a.txt/b"}) {:status 409})
          (expect h (ring :copy "/dav/a.txt" :headers {"Destination" "/dav/missing/b.txt"
                                                       "If-Match"    "\"stale\""})
                  {:status 409}))))
+
+(deftest a-tree-too-deep-to-walk
+  (let [deep (vec (repeat 300 "c"))
+        a    (atom {:resources (into {[] {:collection? true :props {}}}
+                                     (for [n (range 1 301)]
+                                       [(subvec deep 0 n) {:collection? true :props {}}]))})
+        h    (share a)]
+    (run (expect h (ring :copy "/dav/c/" :headers {"Destination" "/dav/d/"})
+                 #(do (is (= 207 (:status %)))
+                      (is (str/includes? (text (:body %)) "403 Forbidden"))))
+         (expect h (ring :get "/dav/d/") {:status 200}))))
 
 (deftest deletes-that-partly-fail
   (let [backend (update (dissoc (memory/backend) :move!) :delete!
@@ -342,7 +365,33 @@
          (expect h (ring :propfind "/dav/" :headers {"Depth" "0" "Prefer" "return=\"minimal\""})
                  {:headers {"Preference-Applied" "return=minimal"}})
          (expect h (ring :foo "/dav/") {:status 501})
+         (expect h (ring :get "/dav/a.txt" :headers {"If" "<"}) {:status 400})
+         (expect h (ring :get "/dav/a.txt" :headers {"If" "<a> (["}) {:status 400})
          (expect h (ring :lock "/dav/") {:status 405}))))
+
+(defn- nested
+  "An element of the namespace urn:x nested `n` levels deep."
+  [n]
+  (str (str/join (repeat n "<x:n xmlns:x='urn:x'>")) (str/join (repeat n "</x:n>"))))
+
+(deftest hostile-xml
+  (let [h  (share (atom {}) {:max-xml-bytes 20000})
+        pp #(ring :proppatch "/dav/" :body (str "<propertyupdate xmlns='DAV:'>" % "</propertyupdate>"))]
+    (run (expect h (pp "<set><prop><x:p xmlns:x='foo'>1</x:p></prop></set>") {:status 400})
+         (expect h (ring :proppatch "/dav/"
+                         :body (str "<!DOCTYPE p [<!ENTITY e 'eeeeeeeeee'>]>"
+                                    "<propertyupdate xmlns='DAV:'><set><prop>"
+                                    "<x:p xmlns:x='urn:x'>&e;&e;</x:p></prop></set></propertyupdate>"))
+                 {:status 400})
+         (expect h (pp (str "<set><prop>" (nested 250) "</prop></set>")) {:status 400})
+         (expect h (pp (str "<set><prop>" (nested 240) "</prop></set>")) {:status 207})
+         (expect h (pp (str "<set><prop><x:big xmlns:x='urn:x'>" (str/join (repeat 6000 ">"))
+                            "</x:big></prop></set>"))
+                 {:status 207 :body #"507 Insufficient Storage"})
+         (expect h (ring :propfind "/dav/" :headers {"Depth" "0"})
+                 #(do (is (= 207 (:status %)))
+                      (is (not (str/includes? (text (:body %)) "x:big")) "a refused property isn't kept")))
+         (expect h (pp "<remove><prop><x:n xmlns:x='urn:x'/></prop></remove>") {:status 207}))))
 
 (deftest a-backend-that-cannot-list
   (let [h (server/handler (dissoc (memory/backend) :children :move!) {:root "/dav/"})]

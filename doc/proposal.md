@@ -181,6 +181,13 @@ The client follows like-minded and websub-clj:
 handler's backend returns maps with the same keys, so a client of
 like-minded and its server share their vocabulary.
 
+**A server can't steer the client's credentials.** A resource has a :url
+only on the origin of the request, since a request to it would carry
+the same credentials, and a :name only when it could name a file, so
+that a sync client can't be told to write `../x`. A URL with credentials
+in it is refused, as fetch refuses it, so that a password stays in
+:credentials and out of URLs and error messages.
+
 ### The server
 
 ```clojure
@@ -371,7 +378,19 @@ body.
   the body is read when the Content-Length is larger, and else the
   stream refuses with a 413 once it passes the limit, so a backend must
   read the whole body before it replaces anything.
-- **An XML body holds at most 1 MB** (:max-xml-bytes).
+- **An XML body holds at most 1 MB** (:max-xml-bytes), and so do the
+  dead properties of a resource, since they come back in every PROPFIND.
+  A body can't declare a DTD, whose entities would let a small body
+  expand into a large one, nor nest deeper than its answer can.
+- **Locks have limits too.** Shared locks never conflict, and each one
+  comes back in the lockdiscovery of everything it covers, so an owner
+  holds at most 1 KB, a resource takes at most 8 locks, and the table
+  :max-locks, 10,000.
+- **A document runs no script.** A client chose its type, and an HTML or
+  SVG document would run with the origin of the share, which may be the
+  app's, so a GET sends nosniff and a sandbox as its Content-Security-Policy.
+- **A name has one path.** Each segment is in Unicode's form C, so that a
+  lock on café covers café in its other form, which macOS writes.
 - **A PUT with a Content-Range gets a 400,** as RFC 9110, section 14.5,
   asks of a server without partial PUT, so a resumed upload can't write
   its part as the whole file.
@@ -379,9 +398,8 @@ body.
 - **No path escapes the root.** `..`, `%2e%2e`, encoded slashes and
   backslashes, control characters and invalid UTF-8 all get a 400, and a
   Destination outside the root or on another host gets a 502.
-- **A namespace URI that's the name of an alias gets a 400,** e.g. a
-  property in the namespace `dav`, which would otherwise pass for one in
-  `DAV:`.
+- **A relative namespace URI gets a 400,** e.g. a property in the
+  namespace `dav`, which would otherwise pass for one in `DAV:`.
 - **COPY and MOVE refuse a destination inside the source** with a 403,
   since section 9.8.3 warns of the infinite recursion.
 - **The handler checks no credentials.** Mount it behind your login,

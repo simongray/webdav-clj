@@ -16,8 +16,9 @@ standard: collections, properties, COPY and MOVE, and locks.
   few functions, so a share can live in a database, in memory or on disk.
   It takes care of the rest: ETags, preconditions, the If header, Depth,
   and copying and moving between collections.
-- **Safe by default.** Paths can't leave the share, bodies have limits,
-  and PROPFIND refuses depth infinity unless you allow it.
+- **Safe by default.** Paths can't leave the share, bodies, properties
+  and locks have limits, documents run no scripts, and PROPFIND refuses
+  depth infinity unless you allow it.
 - **Tested against litmus.** The handler passes every test of
   [litmus](https://notroj.github.io/litmus/), the classic WebDAV test
   suite, locks included.
@@ -107,6 +108,12 @@ that client to `webdav/call!` as its `:send`. In a browser, the server
 must let the WebDAV methods and headers through CORS and expose the
 ETag.
 
+A resource has a `:url` only on the origin of the request, since a
+request to it carries the same credentials. When a user gives you the
+URL of a share, give `webdav/request` the `:allow-pred` of wary-fetch's
+`url/public?`, so that neither the URL nor a redirect reaches your own
+network.
+
 Serving a share
 ---------------
 
@@ -123,10 +130,11 @@ backend serves a directory:
 ```
 
 It keeps the dead properties and the bodies that are being written in a
-`.webdav` directory of its own, which no request reaches. A browser that
-opens a collection gets a plain page of links to its members. The memory
-backend in `dk.simongray.webdav.memory` serves an atom instead, on every
-platform, e.g. for tests.
+`.webdav` directory of its own, which no request reaches. It follows no
+symbolic links, and nothing else should write to the directory while it
+serves it. A browser that opens a collection gets a plain page of links
+to its members. The memory backend in `dk.simongray.webdav.memory`
+serves an atom instead, on every platform, for tests.
 
 A backend of your own is a map of functions of a path, a vector of
 decoded segments below the root. Only `:resource` is required, so this

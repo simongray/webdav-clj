@@ -46,6 +46,9 @@
         "nor If-Modified-Since beside If-None-Match")))
 
 (deftest if-header
+  (testing "a bracket that never closes"
+    (doseq [s ["<" "(<" "([" "<a> (<" "(<a> [)"]]
+      (is (nil? (conditions/parse-if s)) s)))
   (testing "section 10.4.6, untagged lists"
     (is (= [{:href nil :conditions [{:token "urn:uuid:181d4fae-7d8c-11d0-a765-00a0c91e6bf2" :not? false}
                                     {:etag "\"I am an ETag\"" :not? false}]}

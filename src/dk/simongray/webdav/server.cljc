@@ -88,7 +88,8 @@
     502
   - :max-bytes, the most that the body of a PUT can hold, 1 GB
   - :max-xml-bytes, the most that the XML body of a PROPFIND or a
-    PROPPATCH can hold, 1 MB
+    PROPPATCH can hold, and the dead properties of a resource as XML,
+    1 MB
   - :propfind-infinity?, whether PROPFIND answers at depth infinity on a
     collection, false
   - :namespaces, the aliases of namespaces in property names, from URI to
@@ -104,6 +105,7 @@
     for class 1 alone
   - :max-lock-seconds, the longest that a lock lasts before its client
     refreshes it, an hour, whatever the Timeout header asks for
+  - :max-locks, the most live locks that the lock table holds, 10,000
   - :principal, a function of the request that returns who sends it, e.g.
     the user that your login found, since only the principal that took a
     lock can use it; by default nobody, so any client can
@@ -119,6 +121,7 @@
    :methods            {}
    :locks              nil
    :max-lock-seconds   3600
+   :max-locks          10000
    :principal          (constantly nil)
    :clock              #?(:clj #(java.util.Date.) :cljs #(js/Date.))})
 
@@ -253,8 +256,12 @@
           (zero? (bytes/length b)) {}
           :else
           (try
+            ;; a property or a lock owner sits deeper in an answer than in
+            ;; the request, by up to five levels, and every client must
+            ;; still read the answer
             {:tree (xml/parse (qh/decode b (ring/charset (get headers "content-type")))
-                              (:namespaces opts))}
+                              (:namespaces opts)
+                              {:max-depth (- qh/max-depth 8)})}
             (catch #?(:clj Exception :cljs :default) _
               {:response (ring/text 400 "The body isn't well-formed XML")})))))))
 
@@ -283,12 +290,18 @@
   path outside the share, and :invalid when it isn't a URL or has a
   segment that can't name a resource."
   [{:keys [request opts] :as ctx} s]
-  (let [base     (str "http://localhost" (:uri request))
-        absolute (url/parse (str s))]
+  ;; resolved against a host that no URL names, so that any other host
+  ;; came from `s`, e.g. from //host/a or \\host\a
+  (let [resolved (url/parse (str s) (str "http://webdav-clj.invalid" (:uri request)))]
     (cond
-      (nil? (url/parse (str s) base))              :invalid
-      (and absolute (not (same-host? ctx absolute))) nil
-      :else                                        (paths/resolve (:root opts) (:uri request) s))))
+      (nil? resolved)
+      :invalid
+
+      (and (not= "webdav-clj.invalid" (url/hostname resolved)) (not (same-host? ctx resolved)))
+      nil
+
+      :else
+      (paths/resolve (:root opts) (:uri request) s))))
 
 ;; RFC 4918, section 10.4.4: a lock token matches anywhere in the scope of
 ;; its lock, an unmapped URL included
@@ -436,12 +449,16 @@
              "MS-Author-Via" "DAV"}
    :body    ""})
 
-;; RFC 9110, section 14.3: a document of known length answers ranges
+;; RFC 9110, section 14.3: a document of known length answers ranges. A
+;; client chose the type, so an HTML or SVG document runs no script with
+;; the share's origin, which may be the app's.
 (defn- representation
   "The headers of a GET of the document `resource`."
   [{:keys [content-type content-language content-length] :as resource}]
   (cond-> (assoc (validators resource)
-                 "Content-Type" (or content-type "application/octet-stream"))
+                 "Content-Type"            (or content-type "application/octet-stream")
+                 "X-Content-Type-Options"  "nosniff"
+                 "Content-Security-Policy" "sandbox")
     content-language (assoc "Content-Language" content-language)
     content-length   (assoc "Accept-Ranges" "bytes")))
 
@@ -661,15 +678,6 @@
                                                  :headers {}
                                                  :body    ""}))))))))))
 
-;; e.g. café in its two Unicode forms, which name one file on macOS, so
-;; that a MOVE from one to the other can't delete it as the destination
-(defn- nfc
-  "The `path` with each segment in Unicode's normalization form C."
-  [path]
-  (mapv #?(:clj  #(java.text.Normalizer/normalize ^String % java.text.Normalizer$Form/NFC)
-           :cljs #(.normalize % "NFC"))
-        path))
-
 (defn- transfer-to
   "The answer to a COPY, or a MOVE when `move?`, of the resource of `ctx`
   to the path `to` at `depth`, with the `overwrite` header, once the
@@ -684,7 +692,7 @@
 
        ;; RFC 4918, section 9.8.3: a collection copied into itself would
        ;; never end
-       (paths/within? (nfc path) (nfc to))
+       (paths/within? path to)
        (ring/text 403 "The destination is inside the source")
 
        :else
@@ -716,7 +724,7 @@
 
       ;; RFC 4918, sections 9.8.5 and 9.9.4: the same resource, or one that
       ;; holds the source
-      (paths/within? (nfc to) (nfc path))
+      (paths/within? to path)
       (ring/text 403 "The destination is the source or holds it")
 
       (and (= :infinity depth)
@@ -729,9 +737,9 @@
 
 (defn- members
   "The paths and resource maps of the resource at `path` and of its
-  members, down to `depth`."
+  members, down to `depth`, and no deeper than copy/max-depth."
   [ctx path resource depth]
-  (if (and (:collection? resource) (not= 0 depth))
+  (if (and (:collection? resource) (not= 0 depth) (< (count path) copy/max-depth))
     (async/then
      (children-at ctx path)
      (fn [children]
@@ -866,10 +874,30 @@
   [[kind x :as op]]
   (if (= :set kind) (first x) x))
 
+;; the dead properties come back in every PROPFIND, so they have the
+;; limit of a body, or a few PROPPATCHes could make answers that no client
+;; reads
+(defn- too-large?
+  "Whether the PROPPATCH operations `ops` set dead properties that would
+  make those of the resource of `ctx` more than :max-xml-bytes of XML."
+  [{:keys [backend opts path] :as ctx} ops]
+  (when (some #(= :set (first %)) ops)
+    (async/then (props/dead backend path)
+                (fn [dead]
+                  (let [after (reduce (fn [m [kind x]]
+                                        (case kind
+                                          :set    (assoc m (first x) x)
+                                          :remove (dissoc m x)))
+                                      dead
+                                      ops)]
+                    (< (:max-xml-bytes opts)
+                       (bytes/length (bytes/encode (xml/emit (into [:dav/prop {}] (vals after))
+                                                             (:namespaces opts))))))))))
+
 (defn- patch
   "The answer to the PROPPATCH operations `ops` on the resource of `ctx`,
   with the `prefs` of the Prefer header. A protected property fails them
-  all, as section 9.2 requires."
+  all, as section 9.2 requires, and so do properties past :max-xml-bytes."
   [{:keys [backend path] :as ctx} ops prefs]
   (let [names     (distinct (map operation-name ops))
         protected (filter (partial protected? ctx) names)]
@@ -881,9 +909,16 @@
       (patch-answer ctx names (zipmap names (repeat 403)) prefs)
 
       :else
-      (async/then ((:patch-props! backend) path ops)
-                  (fn [refused]
-                    (patch-answer ctx names (if (map? refused) refused {}) prefs))))))
+      (async/then (too-large? ctx ops)
+                  (fn [large?]
+                    (if large?
+                      (patch-answer ctx names
+                                    (zipmap (map operation-name (filter #(= :set (first %)) ops))
+                                            (repeat 507))
+                                    prefs)
+                      (async/then ((:patch-props! backend) path ops)
+                                  (fn [refused]
+                                    (patch-answer ctx names (if (map? refused) refused {}) prefs)))))))))
 
 ;; RFC 4918, section 9.2
 (defn- proppatch-response
@@ -935,19 +970,26 @@
      :expires   (+ now (* 1000 seconds))
      :principal ((:principal opts) request)}))
 
+;; shared locks never conflict, so each resource and the table have a
+;; limit of their own
 (defn- take-lock!
   "Add the `lock` to the lock table of the handler of `ctx` and drop the
-  locks that have expired, unless a live lock conflicts with it. It
-  returns the conflicting locks, or nil when it took the lock."
+  locks that have expired. It returns nil when it took the lock, or else
+  why not: the :conflicting locks, or :full? when the table already holds
+  :max-locks, or 8 locks share the lock's resource."
   [{:keys [opts now] :as ctx} lock]
-  (let [conflicting (volatile! nil)]
+  (let [refused (volatile! nil)]
     (swap! (:locks opts)
            (fn [table]
              (let [live  (into {} (remove #(< (:expires (val %)) now)) table)
-                   found (seq (locks/conflicts (vals live) lock))]
-               (vreset! conflicting found)
-               (if found live (assoc live (:token lock) lock)))))
-    @conflicting))
+                   found (seq (locks/conflicts (vals live) lock))
+                   full? (or (<= (:max-locks opts) (count live))
+                             (<= 8 (count (filter #(= (:path lock) (:path %)) (vals live)))))]
+               (vreset! refused (cond
+                                  found {:conflicting found}
+                                  full? {:full? true}))
+               (if @refused live (assoc live (:token lock) lock)))))
+    @refused))
 
 (defn- unlock!
   "Remove the lock of `token` from the lock table of the handler of
@@ -961,20 +1003,28 @@
   at `depth`. An unmapped URL gets an empty document, as section 9.10.4
   asks."
   [{:keys [backend path resource] :as ctx} lockinfo depth]
-  (let [lock   (new-lock ctx lockinfo depth)
-        answer #(lock-answer ctx % [lock] {"Lock-Token" (str "<" (:token lock) ">")})]
-    (if-let [conflicting (take-lock! ctx lock)]
+  (let [lock                        (new-lock ctx lockinfo depth)
+        answer                      #(lock-answer ctx % [lock] {"Lock-Token" (str "<" (:token lock) ">")})
+        {:keys [conflicting full?]} (take-lock! ctx lock)]
+    (cond
+      conflicting
       (xml-response ctx 423 (xml/error [(into [:dav/no-conflicting-lock {}]
                                               (map #(vector :dav/href {} (:href %)))
                                               conflicting)]))
-      (if resource
-        (answer 200)
-        (async/then (ring/attempt #((:put! backend) path (ring/put-body "") {}))
-                    (fn [result]
-                      (if-let [refused (::ring/refused result)]
-                        (do (unlock! ctx (:token lock))
-                            (refusal ctx refused))
-                        (answer 201))))))))
+
+      full?
+      (ring/text 507 "No more locks can be taken")
+
+      resource
+      (answer 200)
+
+      :else
+      (async/then (ring/attempt #((:put! backend) path (ring/put-body "") {}))
+                  (fn [result]
+                    (if-let [refused (::ring/refused result)]
+                      (do (unlock! ctx (:token lock))
+                          (refusal ctx refused))
+                      (answer 201)))))))
 
 ;; RFC 4918, section 9.10.2
 (defn- lock-refresh
@@ -1003,7 +1053,7 @@
 ;; RFC 4918, section 9.10
 (defn- lock-response
   "The answer to LOCK for the resource of `ctx`."
-  [{:keys [request backend opts resource] :as ctx}]
+  [{:keys [request backend opts path resource] :as ctx}]
   (let [depth (depth (:headers request) :infinity)]
     (cond
       (nil? (:locks opts))  (unknown-response ctx)
@@ -1021,16 +1071,23 @@
           (nil? lockinfo)
           (ring/text 400 "The body isn't a DAV:lockinfo of a write lock")
 
+          ;; the owner comes back in the DAV:lockdiscovery of every resource
+          ;; that the lock covers
+          (some-> (:owner lockinfo) (xml/emit (:namespaces opts)) bytes/encode bytes/length (> 1024))
+          (ring/text 400 "The owner of a lock holds at most 1 KB of XML")
+
           resource
           (unless (precondition-failure ctx resource) #(lock-new ctx lockinfo depth))
 
           (not (capable? backend :put))
           (not-allowed ctx)
 
+          ;; the empty document is a new member of a collection that a lock
+          ;; may cover
           :else
           (unless (parent-failure ctx)
-                  #(unless (precondition-failure ctx nil)
-                           (fn [] (lock-new ctx lockinfo depth)))))))))
+                  #(checked ctx nil [(paths/parent path)]
+                            (fn [] (lock-new ctx lockinfo depth)))))))))
 
 ;; RFC 4918, section 9.11
 (defn- unlock-response

@@ -9,6 +9,7 @@
   \"http://example.com/ns/\" \"color\"), and a name in no namespace is a
   plain keyword. Writing a tree gives each URI a prefix of its own."
   (:require [clojure.set :as set]
+            [clojure.string :as str]
             [clojure.walk :as walk]
             [dk.simongray.qname-hiccup :as qh]))
 
@@ -16,22 +17,41 @@
   "The namespaces that every table has, from URI to alias."
   {"DAV:" :dav})
 
+;; qname-hiccup writes a keyword namespace with a colon as a URI and one
+;; without as an alias
 (defn- uri->alias
   "The function that gives each namespace URI its keyword namespace by
   `namespaces`: the alias, or else the URI itself.
 
-  A URI that's also the name of an alias, e.g. dav, would pass for that
-  alias's namespace, so it throws. Namespaces in XML deprecates such
-  relative URIs anyway."
+  A URI without a colon, e.g. dav, would pass for an alias, so it throws.
+  Namespaces in XML deprecates such relative URIs anyway."
   [namespaces]
-  (let [table   (merge default-namespaces namespaces)
-        aliases (set (map name (vals table)))]
+  (let [table (merge default-namespaces namespaces)]
     (fn [uri]
       (cond
-        (contains? table uri)   (table uri)
-        (contains? aliases uri) (throw (ex-info "A namespace URI is the name of an alias"
-                                                {:type ::malformed :uri uri}))
-        :else                   uri))))
+        (contains? table uri)      (table uri)
+        (str/includes? uri ":")    uri
+        :else                      (throw (ex-info "A namespace URI is relative"
+                                                   {:type ::malformed :uri uri}))))))
+
+(defn- at?
+  "Whether the text `s` has the `prefix` at the index `i`."
+  [s i prefix]
+  (let [n (count s)]
+    (= prefix (subs s (min i n) (min n (+ i (count prefix)))))))
+
+;; WebDAV uses no DTD, and the entities of one can make a small body
+;; expand into a large one
+(defn- doctype?
+  "Whether the XML text `s` declares a document type, which comes after
+  the XML declaration and any comments or processing instructions."
+  [s]
+  (loop [i 0]
+    (cond
+      (#{\space \tab \newline \return (char 0xFEFF)} (get s i)) (recur (inc i))
+      (at? s i "<?")   (when-let [end (str/index-of s "?>" i)] (recur (+ end 2)))
+      (at? s i "<!--") (when-let [end (str/index-of s "-->" i)] (recur (+ end 3)))
+      :else            (at? s i "<!DOCTYPE"))))
 
 ;; Namespaces in XML 1.0, section 3: a prefix must be declared
 (defn- malformed-namespace?
@@ -51,16 +71,21 @@
                  tree))
 
 (defn parse
-  "The Hiccup of the XML text `s`, with names by `namespaces`.
+  "The Hiccup of the XML text `s`, with names by `namespaces`, nested no
+  deeper than the :max-depth of `opts`, qname-hiccup's by default.
 
   A document that isn't well-formed or namespace-well-formed throws
-  ::malformed, and so does one that nests deeper than qname-hiccup allows.
-  No external entity is ever read."
+  ::malformed, and so does one that nests deeper, one with a document
+  type, and one with a relative namespace URI. No entity is ever read."
   ([s]
    (parse s nil))
   ([s namespaces]
+   (parse s namespaces nil))
+  ([s namespaces opts]
+   (when (doctype? s)
+     (throw (ex-info "The XML has a document type" {:type ::malformed})))
    (let [tree (try
-                (qh/parse s (uri->alias namespaces))
+                (qh/parse s (uri->alias namespaces) opts)
                 (catch #?(:clj Exception :cljs :default) e
                   (throw (ex-info "The XML isn't well-formed"
                                   {:type ::malformed} e))))]
@@ -74,9 +99,31 @@
   [x]
   (and (vector? x) (keyword? (first x))))
 
+;; qname-hiccup writes names as they are, so a name with markup in it, e.g.
+;; one that an app took from its user, would change the document. A URI
+;; namespace goes in an attribute's value, which is escaped.
+(defn- check-names!
+  "Throw unless no name in the Hiccup `tree` has markup in it."
+  [tree]
+  (letfn [(plain? [s]
+            (boolean (re-matches #"[^\x00-\x20<>&\"'/=!?:]+" s)))
+          (check [k]
+            (let [ns (namespace k)]
+              (when-not (and (plain? (name k))
+                             (or (nil? ns) (str/includes? ns ":") (plain? ns)))
+                (throw (ex-info "A name can't be written as XML" {:type ::invalid :name k})))))
+          (walk [x]
+            (when (element? x)
+              (check (first x))
+              (when (map? (second x))
+                (run! check (filter keyword? (keys (second x)))))
+              (run! walk (rest x))))]
+    (walk tree)))
+
 (defn emit
   "The XML text of the Hiccup `tree` on one line, with names by
-  `namespaces`, so that a property's value reads back as it was.
+  `namespaces`, so that a property's value reads back as it was. A name
+  with markup in it, e.g. a space or a <, throws.
 
   Each alias in use is declared on the root element, and each URI used as
   a keyword namespace gets a prefix of its own, e.g. ns1. A name in no
@@ -84,6 +131,7 @@
   ([tree]
    (emit tree nil))
   ([tree namespaces]
+   (check-names! tree)
    (qh/emit tree
             (set/map-invert (merge default-namespaces namespaces))
             {:indent false})))

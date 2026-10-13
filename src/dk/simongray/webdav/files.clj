@@ -21,13 +21,17 @@
   file, where the file system has inodes. Each PUT makes a new file, so
   its ETag differs from the last one even within one tick of the clock.
 
-  Some paths count as nothing there:
+  Some paths count as nothing there, nor what's below them:
 
-  - a symbolic link that leads out of the directory
+  - a symbolic link, wherever it leads, and a FIFO or a device
   - the backend's own directory by any name
   - a name that the file system takes for another, e.g. A.txt for a.txt
     on one that ignores case, as macOS's does, so a MOVE can't rename a
-    file by its case alone"
+    file by its case alone
+
+  One process serves a directory, and nobody else writes to it, since a
+  local user who swaps a directory for a link while a request is under
+  way can make the backend write where the link leads."
   (:require [clojure.java.io :as io]
             [dk.simongray.webdav.xml :as xml])
   (:import [java.io InputStream IOException]
@@ -55,49 +59,32 @@
   ^Path [^Path root path]
   (reduce #(.resolve ^Path %1 ^String %2) root path))
 
-(defn- real
-  "The file `f` with its symbolic links followed. A file that isn't there
-  is its directory's real path and its name."
-  ^Path [^Path f]
-  (if (Files/exists f (make-array LinkOption 0))
-    (.toRealPath f (make-array LinkOption 0))
-    (some-> (.getParent f) (.toRealPath (make-array LinkOption 0)) (.resolve (.getFileName f)))))
-
-;; a file system that ignores case, as macOS's does by default, finds the
-;; backend's own directory by another name too
-(defn- own?
-  "Whether the real file `f` below the directory `root` is in the backend's
-  own directory, compared by file rather than by name."
-  [^Path root ^Path f]
-  (let [top (.resolve root (.getName (.relativize root f) 0))
-        own (.resolve root ^String own-dir)]
-    (and (Files/exists top (make-array LinkOption 0))
-         (Files/exists own (make-array LinkOption 0))
-         (Files/isSameFile top own))))
-
-;; e.g. A.txt for a.txt, on a file system that ignores case: the handler
-;; takes them for two resources, so a MOVE from one to the other would
-;; delete the file as the destination that it overwrites. The two Unicode
-;; forms of a name are the same name, which Java on macOS gives in NFC.
-(defn- alias?
+;; A second name for a file, e.g. A.txt for a.txt on a file system that
+;; ignores case, .WEBDAV for the backend's own directory, or a symbolic
+;; link, makes two resources of one file for the handler, so that a MOVE
+;; from one to the other deletes the file as the destination it
+;; overwrites. A link can also lead out of the directory. The two Unicode
+;; forms of a name are one name, which Java on macOS gives in NFC.
+(defn- own-name?
   "Whether the file `f` below the directory `root`, or its directory when
-  it isn't there, has another name on disk."
+  it isn't there, has that name on disk, with no symbolic link on the way."
   [^Path root ^Path f]
   (let [no-links (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])
         existing (if (Files/exists f no-links) f (.getParent f))
+        on-disk  (.toRealPath existing no-links)
         nfc      #(Normalizer/normalize (str (.relativize root ^Path %)) Normalizer$Form/NFC)]
-    (not= (nfc existing) (nfc (.toRealPath existing no-links)))))
+    (and (= (nfc existing) (nfc on-disk))
+         (= on-disk (.toRealPath existing (make-array LinkOption 0))))))
 
 (defn- file-of
   "The file of the share's `path` below the directory `root`, or nil when
-  it's in the backend's own directory, leads out of `root`, has another
-  name on disk, or can't be there, e.g. below a document."
+  it's in the backend's own directory, has another name on disk, is or
+  is below a symbolic link, or can't be there, e.g. below a document."
   ^Path [^Path root path]
   (when-not (= own-dir (first path))
     (try
-      (let [f (resolved root path)
-            r (real f)]
-        (when (and r (.startsWith r root) (not (own? root r)) (not (alias? root f)))
+      (let [f (resolved root path)]
+        (when (own-name? root f)
           f))
       (catch FileSystemException _ nil)
       (catch InvalidPathException _ nil))))
@@ -126,15 +113,23 @@
     (Files/readAttributes f BasicFileAttributes ^"[Ljava.nio.file.LinkOption;" (make-array LinkOption 0))
     (catch FileSystemException _ nil)))
 
+;; a GET of a FIFO or a device would wait or read forever
 (defn- resource
   "The resource map of the file `f`, with its content type by the function
-  `content-type` of its name, or nil when it isn't there."
+  `content-type` of its name, or nil when it isn't there or is neither a
+  regular file nor a directory."
   [^Path f content-type]
-  (when-let [a (attributes f)]
-    (if (.isDirectory a)
+  (let [a (attributes f)]
+    (cond
+      (nil? a)
+      nil
+
+      (.isDirectory a)
       {:collection?   true
        :created       (Date. (.toMillis (.creationTime a)))
        :last-modified (Date. (.toMillis (.lastModifiedTime a)))}
+
+      (.isRegularFile a)
       (let [modified (.lastModifiedTime a)]
         (cond-> {:etag           (str "\"" (Long/toHexString (.size a)) "-"
                                       (Long/toHexString (.to modified TimeUnit/NANOSECONDS))
@@ -144,7 +139,10 @@
                  :created        (Date. (.toMillis (.creationTime a)))
                  :last-modified  (Date. (.toMillis modified))}
           (content-type (str (.getFileName f)))
-          (assoc :content-type (content-type (str (.getFileName f)))))))))
+          (assoc :content-type (content-type (str (.getFileName f))))))
+
+      :else
+      nil)))
 
 ;; a collection's directory ends in .d and a file of properties in .xml,
 ;; so that the properties of a and of the members of a.xml stay apart
@@ -268,10 +266,16 @@
          :or   {content-type #(URLConnection/guessContentTypeFromName %)}
          :as   opts}]
    (let [root (.toRealPath (.toPath (io/file dir)) (make-array LinkOption 0))
-         lock (Object.)]
+         lock (Object.)
+         own  (map #(resolved root %) [[own-dir] [own-dir "props"] [own-dir "tmp"]])]
+     (when-let [link (first (filter #(Files/isSymbolicLink %) own))]
+       (throw (ex-info (str link " is a symbolic link, which the backend won't follow")
+                       {:path (str link)})))
      ;; made now, so that no request can make it first by another name; a
-     ;; directory that can't be written to has nothing to keep there
+     ;; directory that can't be written to has nothing to keep there. Any
+     ;; temporary file is left from a process that stopped in a PUT.
      (try
+       (delete-tree! (resolved root [own-dir "tmp"]))
        (Files/createDirectories (.resolve root ^String own-dir) (make-array FileAttribute 0))
        (catch IOException _))
      {:resource     (fn [path]
@@ -290,23 +294,29 @@
                                vec))))
       :content      (fn [path]
                       (Files/newInputStream (writable root path) (make-array OpenOption 0)))
+      ;; the path is checked again once the body is in, since a directory
+      ;; on the way may have become a link while it came
       :put!         (fn [path body {:keys [if-etag] :as opts}]
-                      (let [f   (creatable root path)
-                            tmp (write-temp! root body)]
-                        (locking lock
-                          (let [current (resource f content-type)]
-                            (when (and (contains? opts :if-etag) (not= if-etag (:etag current)))
-                              (Files/deleteIfExists tmp)
-                              (refuse 412 "The document changed"))
-                            (when-not current
-                              (delete-props! root path))
-                            (install! tmp f)))
-                        (resource f content-type)))
+                      (creatable root path)
+                      (let [tmp (write-temp! root body)]
+                        (try
+                          (locking lock
+                            (let [f       (creatable root path)
+                                  current (resource f content-type)]
+                              (when (and (contains? opts :if-etag) (not= if-etag (:etag current)))
+                                (refuse 412 "The document changed"))
+                              (when-not current
+                                (delete-props! root path))
+                              (move! tmp f)
+                              (resource f content-type)))
+                          (catch Throwable e
+                            (Files/deleteIfExists tmp)
+                            (throw e)))))
       :mkcol!       (fn [path]
                       (let [f (creatable root path)]
                         (locking lock
-                          (Files/createDirectory f (make-array FileAttribute 0))
-                          (delete-props! root path)))
+                          (delete-props! root path)
+                          (Files/createDirectory f (make-array FileAttribute 0))))
                       nil)
       :delete!      (fn [path]
                       (locking lock

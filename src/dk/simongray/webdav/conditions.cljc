@@ -119,13 +119,20 @@
   "The pattern of a token of the If header."
   #"\s*(<[^>]*>|\(|\)|[Nn][Oo][Tt](?=[\s<\[])|\[(?:W/)?\"[^\"]*\"\]|\S)")
 
+;; a lone < or [ is a token too, of the pattern's last kind
+(defn- bracketed
+  "The text inside the If header `token` when it's in the brackets `open`
+  and `close`, or nil."
+  [token open close]
+  (when (and (< 1 (count token)) (str/starts-with? token open) (str/ends-with? token close))
+    (subs token 1 (dec (count token)))))
+
 (defn- condition
   "The condition of the If header `token`, or nil when it isn't one."
   [token]
-  (cond
-    (str/starts-with? token "<") {:token (subs token 1 (dec (count token)))}
-    (str/starts-with? token "[") {:etag (subs token 1 (dec (count token)))}
-    :else                        nil))
+  (if-let [t (bracketed token "<" ">")]
+    {:token t}
+    (some->> (bracketed token "[" "]") (hash-map :etag))))
 
 (defn- read-if-token
   "The `state` of the If header's parser after the `token`, or nil when the
@@ -157,9 +164,9 @@
           (dissoc :not?)))
 
     ;; a Resource-Tag, which must come before every list or none
-    (str/starts-with? token "<")
+    (bracketed token "<" ">")
     (when (or tagged? (empty? (:lists state)))
-      (assoc state :href (subs token 1 (dec (count token))) :tagged? true))
+      (assoc state :href (bracketed token "<" ">") :tagged? true))
 
     :else
     nil))

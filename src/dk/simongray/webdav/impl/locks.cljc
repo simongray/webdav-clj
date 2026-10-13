@@ -118,7 +118,8 @@
   [element]
   (let [timeout (text element :dav/timeout)]
     (cond-> {:token (text element :dav/locktoken)
-             :scope (some-> (child element :dav/lockscope) (nth 2 nil) first name keyword)
+             :scope (some->> (child element :dav/lockscope) (drop 2) (some #(when (vector? %) %))
+                             first name keyword)
              :depth (if (= "infinity" (some-> (text element :dav/depth) str/lower-case))
                       :infinity
                       0)}

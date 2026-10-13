@@ -167,6 +167,40 @@
          (fn [] (reset! now 61000))
          (expect h (ring :put "/dav/a.txt" :headers {"X-User" "bob"} :body "c") {:status 204}))))
 
+(deftest locks-that-others-cannot-get-around
+  (let [h     (share (atom {}) {:locks (atom {}) :principal #(get-in % [:headers "x-user"])})
+        alice {"X-User" "alice"}
+        bob   {"X-User" "bob"}
+        token (atom nil)]
+    (run (expect h (ring :put "/dav/caf%C3%A9.txt" :headers alice :body "a") {:status 201})
+         (expect h (ring :lock "/dav/caf%C3%A9.txt" :headers alice :body (lockinfo :exclusive "alice"))
+                 (taken 200 token))
+         (expect h (ring :put "/dav/cafe%CC%81.txt" :headers bob :body "b") {:status 423})
+         (expect h (ring :delete "/dav/cafe%CC%81.txt" :headers bob) {:status 423})
+         (expect h (ring :mkcol "/dav/c/" :headers alice) {:status 201})
+         (expect h (ring :lock "/dav/c/" :headers (assoc alice "Depth" "0")
+                         :body (lockinfo :exclusive "alice"))
+                 (taken 200 token))
+         (expect h (ring :lock "/dav/c/bob.txt" :headers bob :body (lockinfo :exclusive "bob"))
+                 {:status 423})
+         (expect h (ring :get "/dav/c/bob.txt") {:status 404}))))
+
+(deftest limits-of-locks
+  (let [h     (share (atom {}) {:locks (atom {}) :max-locks 10})
+        token (atom nil)]
+    (apply run
+           (expect h (ring :put "/dav/a.txt" :body "a") {:status 201})
+           (expect h (ring :lock "/dav/a.txt" :body (lockinfo :shared (str/join (repeat 1100 "x"))))
+                   {:status 400})
+           (concat
+            (for [_ (range 8)]
+              (expect h (ring :lock "/dav/a.txt" :body (lockinfo :shared "me")) (taken 200 token)))
+            [(expect h (ring :lock "/dav/a.txt" :body (lockinfo :shared "me")) {:status 507})
+             (expect h (ring :put "/dav/b.txt" :body "b") {:status 201})
+             (expect h (ring :lock "/dav/b.txt" :body (lockinfo :shared "me")) (taken 200 token))
+             (expect h (ring :lock "/dav/b.txt" :body (lockinfo :shared "me")) (taken 200 token))
+             (expect h (ring :lock "/dav/b.txt" :body (lockinfo :shared "me")) {:status 507})]))))
+
 (deftest locks-go-with-their-resources
   (let [table (atom {})
         h     (share (atom {}) {:locks table})

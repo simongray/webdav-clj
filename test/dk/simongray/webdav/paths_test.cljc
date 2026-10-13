@@ -21,6 +21,8 @@
   (is (nil? (paths/parse "/dav/" "/davx/a")))
   (is (= ["a"] (paths/parse "/s@x/" "/s%40x/a")) "the root matches however it's encoded")
   (is (= ["a"] (paths/parse "/caf%c3%a9/" "/caf%C3%A9/a")))
+  (is (= ["café"] (paths/parse "/" "/cafe%CC%81") (paths/parse "/" "/caf%C3%A9"))
+      "both Unicode forms of a name give its form C")
   (is (= ["a"] (paths/parse "/" "/a")))
   (is (nil? (paths/parse "/dav/" "/elsewhere")))
   (testing "a segment that can't name a resource"
@@ -43,12 +45,16 @@
   (is (= "/dav/" (paths/href "/dav/" [] true)))
   (is (= "/dav/100%25%20%3B%23.edn" (paths/href "/dav/" ["100% ;#.edn"]))
       "%, ; and # are encoded, so the href reads back as the name")
-  (is (= ["100% ;#.edn"] (paths/parse "/dav/" (paths/href "/dav/" ["100% ;#.edn"])))))
+  (is (= ["100% ;#.edn"] (paths/parse "/dav/" (paths/href "/dav/" ["100% ;#.edn"]))))
+  (doseq [segment [".." "." "a/b" "a\\b"]]
+    (is (thrown? #?(:clj Exception :cljs :default) (paths/href "/dav/" ["notes" segment])) segment)))
 
 (deftest names-and-parents
   (is (= "a b" (paths/name "https://dav.example.org/dav/a%20b/")))
   (is (= "x.edn" (paths/name "/dav/x.edn")))
   (is (= "" (paths/name "/")))
+  (is (= "a" (paths/name (str "/x" (apply str (repeat 100000 "/")) "a")))
+      "a long run of slashes takes no time")
   (is (= ["a"] (paths/parent ["a" "b"])))
   (is (nil? (paths/parent [])))
   (is (paths/within? ["a"] ["a" "b"]))

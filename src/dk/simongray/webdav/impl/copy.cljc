@@ -4,6 +4,12 @@
   (:require [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.webdav.impl.ring :as ring]))
 
+(def max-depth
+  "The most segments of a path that the handler walks a tree down to, so
+  that a deeper tree, e.g. of collections moved into each other, can't
+  overflow the stack."
+  256)
+
 (defn- refuse
   "Throw a refusal with the `status`, for the `message`."
   [status message]
@@ -41,10 +47,13 @@
   "Copy the resource at `from`, whose map is `resource`, to `to` in the
   `backend`, with its members when `depth` is :infinity. It returns the
   status of each destination path that failed, by path, and skips the
-  members of a collection that failed, as section 9.8.3 asks."
+  members of a collection that failed, as section 9.8.3 asks. A path
+  deeper than max-depth fails with 403."
   [{:keys [children] :as backend} from to resource depth]
   (async/then
-   (ring/attempt #(copy-one! backend from to resource))
+   (if (< max-depth (max (count from) (count to)))
+     {::ring/refused {:status 403}}
+     (ring/attempt #(copy-one! backend from to resource)))
    (fn [result]
      (cond
        (::ring/refused result)

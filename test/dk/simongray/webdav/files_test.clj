@@ -132,6 +132,34 @@
       (finally
         (Files/setPosixFilePermissions dir (PosixFilePermissions/fromString "rwxr-xr-x"))))))
 
+(deftest links-and-other-odd-files
+  (let [dir (temp-dir)
+        h   (share dir)]
+    (Files/createDirectory (.resolve dir "v2") (make-array FileAttribute 0))
+    (Files/writeString (.resolve dir "v2/report.txt") "r" (make-array java.nio.file.OpenOption 0))
+    (Files/createSymbolicLink (.resolve dir "latest") (.resolve dir "v2") (make-array FileAttribute 0))
+    (.waitFor (.start (ProcessBuilder. ["mkfifo" (str (.resolve dir "pipe"))])))
+    (run (expect h (ring :get "/dav/latest/report.txt") {:status 404})
+         (expect h (ring :move "/dav/latest/report.txt" :headers {"Destination" "/dav/v2/report.txt"})
+                 {:status 404})
+         (expect h (ring :get "/dav/v2/report.txt") {:status 200 :body "r"})
+         (expect h (ring :get "/dav/pipe") {:status 404})
+         (expect h (ring :propfind "/dav/" :headers {"Depth" "1"})
+                 #(is (not (re-find #"latest|pipe" (text (:body %)))))))))
+
+(deftest what-the-backend-keeps-for-itself
+  (let [dir     (temp-dir)
+        outside (temp-dir)]
+    (files/backend (.toFile dir))
+    (Files/createDirectories (.resolve dir ".webdav/tmp") (make-array FileAttribute 0))
+    (Files/writeString (.resolve dir ".webdav/tmp/left") "x" (make-array java.nio.file.OpenOption 0))
+    (files/backend (.toFile dir))
+    (is (not (Files/exists (.resolve dir ".webdav/tmp/left") (make-array java.nio.file.LinkOption 0)))
+        "a body left from a process that stopped is deleted")
+    (Files/createSymbolicLink (.resolve dir ".webdav/props") outside (make-array FileAttribute 0))
+    (is (thrown? clojure.lang.ExceptionInfo (files/backend (.toFile dir)))
+        "nor does it start with a link among its own directories")))
+
 (deftest etags-of-quick-writes
   (let [put! (:put! (files/backend (.toFile (temp-dir))))]
     (is (apply distinct? (for [s ["1" "2" "3"]]
