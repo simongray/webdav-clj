@@ -3,7 +3,7 @@ webdav-clj
 
 [![Clojars Project](https://img.shields.io/clojars/v/dk.simongray/webdav-clj.svg)](https://clojars.org/dk.simongray/webdav-clj)
 
-A [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) client and server for
+A [WebDAV](https://en.wikipedia.org/wiki/WebDAV) client and server for
 Clojure and ClojureScript. Talk to Nextcloud, Fastmail or any other
 WebDAV server, or serve your own storage as a share that file managers
 can mount.
@@ -11,8 +11,12 @@ can mount.
 - **Plain data.** Requests and answers are maps, whatever the status, and
   property names are keywords such as `:dav/getetag`.
 - **Your own storage.** A backend is a map of a few functions over a
-  database, a directory or an atom. The Ring handler takes care of the
-  rest: ETags, preconditions, locks, copying and moving.
+  database, a directory or an atom. The
+  [Ring](https://github.com/ring-clojure/ring/wiki/Concepts) handler takes
+  care of the rest:
+  [ETags](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/ETag),
+  [preconditions](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Conditional_requests),
+  locks, copying and moving.
 - **Safe by default.** Paths stay inside the share, every body, property
   and lock has a limit, and uploaded documents can't run scripts.
 - **Tested against litmus.** The handler passes every test of
@@ -31,17 +35,19 @@ Getting started
 
 It requires Clojure 1.11+ and Java 11+. Add it from
 [Clojars](https://clojars.org/dk.simongray/webdav-clj) to the `:deps` in
-your `deps.edn`:
+your [`deps.edn`](https://clojure.org/guides/deps_and_cli):
 
 ```clojure
 dk.simongray/webdav-clj {:mvn/version "0.1.0"}
 ```
 
 For unreleased changes, depend on the latest commit on `master` instead.
-In shadow-cljs, a Git dependency only works through `deps.edn`, so set
-`:deps true` in your `shadow-cljs.edn` too. To read XML in Node, set
-`globalThis.DOMParser` to a DOMParser, e.g. the one from
-`@xmldom/xmldom`.
+In [shadow-cljs](https://shadow-cljs.github.io/docs/UsersGuide.html#deps-edn),
+a Git dependency only works through `deps.edn`, so set `:deps true` in
+your `shadow-cljs.edn` too. To read XML in Node, set
+`globalThis.DOMParser` to a
+[DOMParser](https://developer.mozilla.org/en-US/docs/Web/API/DOMParser),
+e.g. the one from [`@xmldom/xmldom`](https://github.com/xmldom/xmldom).
 
 The client
 ----------
@@ -66,11 +72,12 @@ which uses [wary-fetch](https://github.com/simongray/wary-fetch):
 ;;                  …}]}
 ```
 
-Each resource has keys for its live properties, e.g. `:etag` and
-`:last-modified`, and every value that came back is in `:props`. A
-namespace without an alias keeps its URI as the keyword namespace, so
-give `:namespaces` aliases of your own, e.g.
-`{"http://owncloud.org/ns" :oc}`.
+Each resource has keys for its
+[live properties](https://sabre.io/dav/properties/), e.g. `:etag` and
+`:last-modified`, and every value that came back is in `:props`. An
+[XML namespace](https://en.wikipedia.org/wiki/XML_namespace) without an
+alias keeps its URI as the keyword namespace, so give `:namespaces`
+aliases of your own, e.g. `{"http://owncloud.org/ns" :oc}`.
 
 Writes take the preconditions of HTTP, so two devices can't overwrite
 each other's changes:
@@ -103,11 +110,13 @@ removes it. The docstring of `webdav/request` lists the options of every
 method, e.g. `:patch` for PROPPATCH and `:destination` for COPY and MOVE.
 To send the map with another HTTP client, give it to `webdav/call!` as
 `:send`, or read its answer with `webdav/parse-response`. In a browser,
-the server must let the WebDAV methods and headers through CORS and
+the server must let the WebDAV methods and headers through
+[CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS) and
 expose the ETag.
 
-A resource only has a `:url` on the origin of the request, since a
-request to it carries your credentials. When the URL of a share comes
+A resource only has a `:url` on the
+[origin](https://developer.mozilla.org/en-US/docs/Glossary/Origin) of the
+request, since a request to it carries your credentials. When the URL of a share comes
 from a user, give `webdav/request` an `:allow-pred` of wary-fetch's
 `url/public?`, so that neither the URL nor a redirect reaches your own
 network.
@@ -127,8 +136,9 @@ backend serves a directory:
                  {:port 8080 :join? false})
 ```
 
-It keeps dead properties and unfinished uploads in a `.webdav` directory
-that no request reaches, and it follows no symbolic links. Nothing else
+It keeps [dead properties](https://sabre.io/dav/properties/) and
+unfinished uploads in a `.webdav` directory that no request reaches, and
+it follows no symbolic links. Nothing else
 should write to the directory while it's served. For tests, the memory
 backend in `dk.simongray.webdav.memory` keeps a share in an atom
 instead.
@@ -164,22 +174,28 @@ it writable, and `:copy!` and `:move!` if your storage does those faster
 than the handler can. The docstring of the `server` namespace describes
 each function and the keys of a resource map.
 
-The body of a PUT reaches `:put!` as a stream, an InputStream on the JVM
-and a ReadableStream in ClojureScript, so a large file can be written as
-it arrives, or read into memory with `server/body-bytes`. A document
-whose resource map has a `:content-length` also answers requests for a
-range of bytes, e.g. from a video player that seeks.
+The body of a PUT reaches `:put!` as a stream, an
+[InputStream](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/InputStream.html)
+on the JVM and a
+[ReadableStream](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream)
+in ClojureScript, so a large file can be written as it arrives, or read
+into memory with `server/body-bytes`. A document whose resource map has
+a `:content-length` also answers requests for a
+[range of bytes](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Range_requests),
+e.g. from a video player that seeks.
 
 The handler checks every precondition before it calls a function, and a
-function refuses with an ex-info, e.g. when a quota is full:
+function refuses with an
+[`ex-info`](https://clojuredocs.org/clojure.core/ex-info), e.g. when a
+quota is full:
 
 ```clojure
 (throw (ex-info "The share is full" {:dk.simongray.webdav/status 507}))
 ```
 
-Give the handler a lock table to take locks too, which macOS Finder needs
-before it writes to a share and Microsoft Office before it edits a
-document:
+Give the handler a lock table to take locks too, which
+[macOS Finder](https://sabre.io/dav/clients/finder/) needs before it
+writes to a share and Microsoft Office before it edits a document:
 
 ```clojure
 (server/handler (memory/backend) {:root      "/dav/"
@@ -194,15 +210,18 @@ request.
 The handler checks no credentials, so mount it behind your login. The
 options in `server/default-options` set the limits, the share's public
 host name behind a proxy, aliases of namespaces, and live properties and
-methods of your own, e.g. the REPORT of CalDAV. Windows sends OPTIONS and
+methods of your own, e.g. the REPORT of
+[CalDAV](https://en.wikipedia.org/wiki/CalDAV).
+[Windows](https://sabre.io/dav/clients/windows/) sends OPTIONS and
 PROPFIND to `/` and to each collection above a share before it maps it,
 so if the share isn't at `/`, route those to the handler too.
 
 Not yet
 -------
 
-- **WebDAV Sync** ([RFC 6578](https://www.rfc-editor.org/rfc/rfc6578)),
-  which CalDAV and CardDAV clients use to fetch only what changed.
+- **[WebDAV Sync](https://sabre.io/dav/building-a-caldav-client/#speeding-up-sync-with-webdav-sync),**
+  which CalDAV and [CardDAV](https://en.wikipedia.org/wiki/CardDAV)
+  clients use to fetch only what changed.
 - **CalDAV and CardDAV,** which would be libraries of their own on top of
   this one.
 
