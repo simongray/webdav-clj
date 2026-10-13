@@ -58,6 +58,24 @@
     (is (= {"Destination" "https://cloud.example.org/x" "Depth" "infinity"}
            (:headers (webdav/request :move (str root "a/") {:destination "/x" :depth :infinity}))))
     (is (thrown? #?(:clj Exception :cljs js/Error) (webdav/request :move root))))
+  (testing "LOCK and UNLOCK"
+    (let [r (webdav/request :lock (str root "a.edn") {:scope :exclusive :owner "phone" :timeout 600 :depth 0})]
+      (is (= {"Timeout" "Second-600" "Depth" "0" "Content-Type" "application/xml; charset=utf-8"} (:headers r)))
+      (is (= [:dav/lockinfo {}
+              [:dav/lockscope {} [:dav/exclusive {}]]
+              [:dav/locktype {} [:dav/write {}]]
+              [:dav/owner {} "phone"]]
+             (xml/parse (:body r)))))
+    (is (= {"If" "(<urn:uuid:t>)" "Timeout" "Infinite"}
+           (:headers (webdav/request :lock root {:lock-token "urn:uuid:t" :timeout :infinite})))
+        "a refresh")
+    (is (nil? (:body (webdav/request :lock root {:lock-token "urn:uuid:t"}))))
+    (is (= {"Lock-Token" "<urn:uuid:t>"} (:headers (webdav/request :unlock root {:lock-token "urn:uuid:t"}))))
+    (is (= {"If" "(<urn:uuid:t>)"} (:headers (webdav/request :put root {:lock-token "urn:uuid:t"})))
+        "a write that holds the lock")
+    (is (= {"If" "(Not <DAV:no-lock>)"}
+           (:headers (webdav/request :delete root {:lock-token "urn:uuid:t" :if "(Not <DAV:no-lock>)"})))
+        "an :if of one's own wins"))
   (testing "what any request takes"
     (let [r (webdav/request :report root {:depth 1 :body "<x/>" :minimal? true :timeout-seconds 5
                                           :if [{:href nil :conditions [{:token "DAV:no-lock" :not? true}]}]})]
@@ -154,6 +172,13 @@
                                 (keyword "http://sabredav.org/ns" "message")
                                 (keyword "http://sabredav.org/ns" "header")]}
            (webdav/parse-response (webdav/request :put root) (response 412 (fixture "webdav/nextcloud-412.xml"))))))
+  (testing "a lock that mod_dav took"
+    (let [{:keys [status lock]} (webdav/parse-response (webdav/request :lock root {:scope :exclusive})
+                                                       (response 200 (fixture "webdav/apache-lock.xml")))]
+      (is (= 200 status))
+      (is (= {:scope :exclusive :depth :infinity :timeout 600 :owner [:dav/owner {} "webdav-clj"]}
+             (dissoc lock :token)))
+      (is (str/starts-with? (:token lock) "opaquelocktoken:"))))
   (testing "depth infinity, which mod_dav refuses with a page of HTML"
     (is (= {:status 403}
            (webdav/parse-response (webdav/request :propfind root {:depth :infinity})

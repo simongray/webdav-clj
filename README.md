@@ -6,8 +6,8 @@ webdav-clj
 This is a Clojure and ClojureScript library for
 [WebDAV](https://www.rfc-editor.org/rfc/rfc4918), the protocol that
 Nextcloud, Fastmail, storage boxes and file managers use to share files
-over HTTP. It has a client and a Ring handler for class 1 of the
-standard: collections, properties, COPY and MOVE.
+over HTTP. It has a client and a Ring handler for classes 1 and 2 of the
+standard: collections, properties, COPY and MOVE, and locks.
 
 - **Plain data.** Requests are maps that any HTTP client can send, and
   answers are maps too, whatever their status. Property names are
@@ -18,10 +18,9 @@ standard: collections, properties, COPY and MOVE.
   and copying and moving between collections.
 - **Safe by default.** Paths can't leave the share, bodies have limits,
   and PROPFIND refuses depth infinity unless you allow it.
-- **Tested against litmus.** The handler passes every test of the basic,
-  copymove, props and http suites of
+- **Tested against litmus.** The handler passes every test of
   [litmus](https://notroj.github.io/litmus/), the classic WebDAV test
-  suite.
+  suite, locks included.
 
 The same code runs on the JVM, in Node and in the browser, with the same
 results on each.
@@ -87,8 +86,21 @@ each other's changes:
 ;; or {:status 412} when the document changed in the meantime
 ```
 
-Every method of class 1 is there, with options of its own: `:patch` for
-PROPPATCH, `:destination` and `:overwrite?` for COPY and MOVE, and so on.
+To keep others out for longer, lock the document, write with the lock's
+token, and remove the lock when you're done:
+
+```clojure
+(def lock
+  (:lock (webdav/call! (webdav/request :lock "https://dav.example.org/notes/phone.edn"
+                                       {:scope :exclusive :owner "phone" :timeout 600}))))
+
+(webdav/call! (webdav/request :put "https://dav.example.org/notes/phone.edn"
+                              {:body "{:v 3}" :lock-token (:token lock)}))
+```
+
+A `:lock` with only the `:lock-token` refreshes the lock, and `:unlock`
+removes it. Every other method has options of its own too, e.g. `:patch`
+for PROPPATCH, and `:destination` and `:overwrite?` for COPY and MOVE.
 The docstring of `webdav/request` lists them. To send the map with
 another client, read its answer with `webdav/parse-response`, or give
 that client to `webdav/call!` as its `:send`. In a browser, the server
@@ -144,6 +156,21 @@ function refuses with an ex-info, e.g. when a quota is full:
 (throw (ex-info "The share is full" {:dk.simongray.webdav/status 507}))
 ```
 
+Give the handler a lock table to take locks too, which macOS Finder needs
+before it writes to a share and Microsoft Office before it edits a
+document:
+
+```clojure
+(server/handler (memory/backend) {:root      "/dav/"
+                                  :locks     (atom {})
+                                  :principal :user})
+```
+
+A write to what a lock covers must then hold the lock: send its token,
+as the principal that took it. Here `:principal` gives the `:user` that
+your login put in the request. The table lives in memory, since locks
+last minutes, and an expired lock simply stops counting.
+
 The options of `server/handler`, listed in `server/default-options`, set
 the limits, the share's public host name behind a proxy, the aliases of
 namespaces, live properties of your own (e.g. the principal of RFC 5397)
@@ -153,8 +180,6 @@ no credentials, so mount it behind your login.
 Not yet
 -------
 
-- **Locking** (class 2, LOCK and UNLOCK). Without it, macOS Finder mounts
-  a share read-only, and Microsoft Office opens documents read-only.
 - **WebDAV Sync** ([RFC 6578](https://www.rfc-editor.org/rfc/rfc6578)),
   which CalDAV and CardDAV clients use to fetch only what changed.
 - **Streaming bodies.** The handler reads a PUT into memory, so its limit

@@ -57,6 +57,6 @@
         (.stop server 0)))))
 
 (deftest the-client-against-the-handler-over-http
-  (with-server (share)
+  (with-server (share (atom {}) {:locks (atom {})})
     (fn [origin]
       (apply run (scenario http/send! (str origin "/dav/"))))))

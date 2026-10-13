@@ -1,7 +1,7 @@
 (ns dk.simongray.webdav.server
-  "A Ring handler that serves a backend of your own over WebDAV: class 1
-  of RFC 4918, with the conditional requests of RFC 9110 and the Prefer
-  header of RFC 8144.
+  "A Ring handler that serves a backend of your own over WebDAV: classes 1
+  and 2 of RFC 4918, with the conditional requests of RFC 9110 and the
+  Prefer header of RFC 8144.
 
   A backend is a map of functions. Each one takes a path, a vector of
   decoded segments below the root of the share (see the paths namespace),
@@ -30,9 +30,8 @@
   For a conditional request, the map also has the :if-etag, the :etag of
   the resource map that the handler checked (nil when nothing was
   there), so that a backend that can write conditionally refuses a
-  document that changed since. A
-  :patch-props! takes the operations in order: [:set element] and
-  [:remove name].
+  document that changed since. A :patch-props! takes the operations in
+  order: [:set element] and [:remove name].
 
   The functions that write return nil. When :delete!, :copy! or :move!
   can't change some members, they can return a map of those paths to a
@@ -49,7 +48,15 @@
   - :last-modified and :created, instants
   - :content-type, :content-length and :content-language
   - :resource-type, the names of more elements of DAV:resourcetype, e.g.
-    [:cal/calendar]"
+    [:cal/calendar]
+
+  With :locks, an atom of the lock table, the handler takes LOCK and
+  UNLOCK too (class 2). A write to what a lock covers then has to submit
+  the lock's token in an If header, as the principal that took it. The
+  table is a map of locks by token, which the handler keeps itself, and
+  an expired lock simply stops counting. It lives in memory, since locks
+  last minutes, so several processes that serve one share must share the
+  atom."
   (:require [clojure.string :as str]
             [dk.simongray.qname-hiccup :as qh]
             [dk.simongray.wary-fetch.async :as async]
@@ -57,6 +64,7 @@
             [dk.simongray.webdav.conditions :as conditions]
             [dk.simongray.webdav.impl.copy :as copy]
             [dk.simongray.webdav.impl.dates :as dates]
+            [dk.simongray.webdav.impl.locks :as locks]
             [dk.simongray.webdav.impl.props :as props]
             [dk.simongray.webdav.impl.ring :as ring]
             [dk.simongray.webdav.paths :as paths]
@@ -85,7 +93,15 @@
   - :compliance, the classes that the DAV header names after 1, e.g.
     [\"calendar-access\"]
   - :methods, the methods of your own, a map from a method, e.g. :report,
-    to a function of the context of the request (see handler)"
+    to a function of the context of the request (see handler)
+  - :locks, an atom of the lock table for class 2, e.g. (atom {}), or nil
+    for class 1 alone
+  - :max-lock-seconds, the longest that a lock lasts before its client
+    refreshes it, an hour, whatever the Timeout header asks for
+  - :principal, a function of the request that returns who sends it, e.g.
+    the user that your login found, since only the principal that took a
+    lock can use it; by default nobody, so any client can
+  - :clock, a function of no arguments that returns the instant now"
   {:root               "/"
    :hosts              []
    :max-bytes          (* 32 1024 1024)
@@ -94,7 +110,11 @@
    :namespaces         {}
    :live-properties    {}
    :compliance         []
-   :methods            {}})
+   :methods            {}
+   :locks              nil
+   :max-lock-seconds   3600
+   :principal          (constantly nil)
+   :clock              #?(:clj #(java.util.Date.) :cljs #(js/Date.))})
 
 (defn- unless
   "The response `x` (or a promise of it), or else what `f` returns, when
@@ -168,6 +188,7 @@
                  ["PROPFIND" "PROPPATCH"]
                  (when-not resource [:mkcol])
                  (when resource [:copy :move])
+                 (when (:locks opts) ["LOCK" "UNLOCK"])
                  (map (comp str/upper-case name) (keys (:methods opts))))
          (keep #(if (keyword? %)
                   (when (capable? backend %) (str/upper-case (name %)))
@@ -262,14 +283,23 @@
       (and absolute (not (same-host? ctx absolute))) nil
       :else                                        (paths/resolve (:root opts) (:uri request) s))))
 
+;; RFC 4918, section 10.4.4: a lock token matches anywhere in the scope of
+;; its lock, an unmapped URL included
+(defn- if-state
+  "The :etag of the `resource` at `path` and the lock :tokens that cover
+  it, as the If header of a request in `ctx` compares them."
+  [{:keys [locks] :as ctx} path resource]
+  {:etag   (some-> resource normalized :etag)
+   :tokens (when (vector? path) (map :token (locks/covering locks path)))})
+
 (defn- if-states
-  "The :etag of the resource of each href of the If header's `lists`, by
-  href. An href outside the share or unmapped has none."
+  "The state of the resource of each href of the If header's `lists`, by
+  href. An href outside the share has none."
   [ctx lists]
   (ring/reduce-then (fn [states href]
                       (let [path (local-path ctx href)]
                         (async/then (when (vector? path) (resource-at ctx path))
-                                    #(assoc states href (select-keys (some-> % normalized) [:etag])))))
+                                    #(assoc states href (if-state ctx path %)))))
                     {}
                     (distinct (keep :href lists))))
 
@@ -278,16 +308,61 @@
   "The response that the If header of the request of `ctx` gives when it
   fails, or nil when it holds or there's none. Its untagged lists apply
   to the `resource`."
-  [{:keys [request] :as ctx} resource]
+  [{:keys [request path] :as ctx} resource]
   (when-let [header (get-in request [:headers "if"])]
     (if-let [lists (conditions/parse-if header)]
       (async/then (if-states ctx lists)
                   (fn [states]
                     (when-not (conditions/if-true?
                                lists
-                               #(if % (get states %) (select-keys (some-> resource normalized) [:etag])))
+                               #(if % (get states %) (if-state ctx path resource)))
                       (ring/text 412 "Precondition Failed"))))
       (ring/text 400 "The If header can't be parsed"))))
+
+;; RFC 4918, section 10.4.1: a token counts as submitted wherever it is in
+;; the If header, whether its condition holds or not
+(defn- submitted
+  "The lock tokens that the If header of the `request` submits."
+  [request]
+  (set (keep :token (mapcat :conditions
+                            (conditions/parse-if (get-in request [:headers "if"]))))))
+
+(defn- mine?
+  "Whether the request of `ctx` holds the `lock`: it submits the lock's
+  token, and as the principal that took it, as section 6.4 asks."
+  [{:keys [request opts submitted] :as ctx} lock]
+  (and (contains? submitted (:token lock))
+       (= ((:principal opts) request) (:principal lock))))
+
+;; RFC 4918, sections 7 and 7.4: a lock protects the resources it covers,
+;; and the membership of a collection it covers
+(defn- lock-failure
+  "The 423 when a lock covers one of the `paths` that the request of `ctx`
+  changes and the request holds no lock that covers it, or nil."
+  [{:keys [locks] :as ctx} paths]
+  (let [blocked (for [path  (distinct (remove nil? paths))
+                      :let  [covering (locks/covering locks path)]
+                      :when (and (seq covering) (not-any? #(mine? ctx %) covering))]
+                  (first covering))]
+    (when (seq blocked)
+      (xml-response ctx 423 (xml/error [(into [:dav/lock-token-submitted {}]
+                                              (map #(vector :dav/href {} (:href %)))
+                                              (distinct blocked))])))))
+
+(defn- subtree
+  "The `path` and the roots of the locks of `ctx` below it, all of which a
+  request that deletes or replaces the resource at `path` changes."
+  [{:keys [locks] :as ctx} path]
+  (cons path (map :path (locks/rooted-within locks path))))
+
+;; RFC 4918, section 9.6: a delete destroys the locks rooted on what it
+;; deletes
+(defn- release!
+  "Remove the locks rooted at `path` or below it from the lock table of
+  the handler in `ctx`, if it has one."
+  [{:keys [opts] :as ctx} path]
+  (when-let [table (:locks opts)]
+    (swap! table (fn [m] (into {} (remove #(paths/within? path (:path (val %)))) m)))))
 
 (defn- validators
   "The ETag and Last-Modified headers of the `resource`."
@@ -347,7 +422,9 @@
   "The answer to OPTIONS for the resource of `ctx`."
   [{:keys [opts] :as ctx}]
   {:status  200
-   :headers {"DAV"           (str/join ", " (cons "1" (:compliance opts)))
+   :headers {"DAV"           (str/join ", " (concat ["1"]
+                                                    (when (:locks opts) ["2"])
+                                                    (:compliance opts)))
              "Allow"         (allowed ctx)
              "MS-Author-Via" "DAV"}
    :body    ""})
@@ -384,16 +461,46 @@
                               :headers (representation resource)
                               :body    (ring/body content)}))))))
 
+;; a failed If header is a 412 before a lock without its token is a 423,
+;; as litmus expects
+(defn- checked
+  "What `f`, a function of no arguments, answers once the preconditions of
+  the request of `ctx` hold for the `resource`, and the request holds the
+  locks of the `paths` that it changes. Else it's the answer that refuses
+  the request."
+  [ctx resource paths f]
+  (unless (precondition-failure ctx resource)
+          #(unless (lock-failure ctx paths) f)))
+
+(defn- put-answer
+  "The answer to the PUT of `ctx` once it checks out: the body written, or
+  a 413 when it's larger than :max-bytes."
+  [{:keys [request backend opts path resource] :as ctx}]
+  (if-let [b (ring/body-bytes (:body request) (:max-bytes opts))]
+    (async/then ((:put! backend)
+                 path
+                 b
+                 (cond-> {:content-type (get-in request [:headers "content-type"])}
+                   (conditional? ctx) (assoc :if-etag (:etag resource))))
+                (fn [written]
+                  {:status  (if resource 204 201)
+                   :headers (if-let [etag (some-> written :etag conditions/etag)]
+                              {"ETag" etag}
+                              {})
+                   :body    ""}))
+    (ring/text 413 "The body is too large")))
+
 ;; RFC 9110, section 9.3.4; RFC 4918, section 9.7
 (defn- put-response
   "The answer to PUT for the resource of `ctx`."
   [{:keys [request backend opts path resource] :as ctx}]
-  (let [{:keys [headers body]} request
-        max-bytes              (:max-bytes opts)]
+  (let [headers (:headers request)]
     (cond
-      (not (capable? backend :put))                          (not-allowed ctx)
-      (:collection? resource)                                (not-allowed ctx)
-      (some-> (ring/content-length headers) (> max-bytes)) (ring/text 413 "The body is too large")
+      (not (capable? backend :put)) (not-allowed ctx)
+      (:collection? resource)       (not-allowed ctx)
+
+      (some-> (ring/content-length headers) (> (:max-bytes opts)))
+      (ring/text 413 "The body is too large")
 
       ;; RFC 9110, section 14.5: a partial PUT would write the part as the
       ;; whole document
@@ -402,21 +509,8 @@
 
       :else
       (unless (parent-failure ctx)
-              #(unless (precondition-failure ctx resource)
-                       (fn []
-                         (if-let [b (ring/body-bytes body max-bytes)]
-                           (async/then ((:put! backend)
-                                        path
-                                        b
-                                        (cond-> {:content-type (get headers "content-type")}
-                                          (conditional? ctx) (assoc :if-etag (:etag resource))))
-                                       (fn [written]
-                                         {:status  (if resource 204 201)
-                                          :headers (if-let [etag (some-> written :etag conditions/etag)]
-                                                     {"ETag" etag}
-                                                     {})
-                                          :body    ""}))
-                           (ring/text 413 "The body is too large"))))))))
+              #(checked ctx resource (cond-> [path] (nil? resource) (conj (paths/parent path)))
+                        (fn [] (put-answer ctx)))))))
 
 ;; RFC 4918, section 9.6
 (defn- delete-response
@@ -430,11 +524,12 @@
          (not= :infinity (depth (:headers request) :infinity)))
     (ring/text 400 "A collection is deleted at depth infinity")
     :else
-    (unless (precondition-failure ctx resource)
-            #(async/then ((:delete! backend) path)
-                         (fn [failed]
-                           (or (failures ctx failed)
-                               {:status 204 :headers {} :body ""}))))))
+    (checked ctx resource (cons (paths/parent path) (subtree ctx path))
+             #(async/then ((:delete! backend) path)
+                          (fn [failed]
+                            (or (failures ctx failed)
+                                (do (release! ctx path)
+                                    {:status 204 :headers {} :body ""})))))))
 
 ;; RFC 4918, section 9.3
 (defn- mkcol-response
@@ -448,10 +543,10 @@
     (ring/text 415 "MKCOL takes no body")
     :else
     (unless (parent-failure ctx)
-            #(unless (precondition-failure ctx nil)
-                     (fn []
-                       (async/then ((:mkcol! backend) path)
-                                   (constantly {:status 201 :headers {} :body ""})))))))
+            #(checked ctx nil [path (paths/parent path)]
+                      (fn []
+                        (async/then ((:mkcol! backend) path)
+                                    (constantly {:status 201 :headers {} :body ""})))))))
 
 (defn- transfer!
   "Copy the `resource` at the path of `ctx` to the path `to` at `depth`,
@@ -470,7 +565,7 @@
   to the path `to` at `depth`, once the request and its preconditions
   check out. The `overwrite` header says whether the resource `existing`
   at `to` may go."
-  [{:keys [backend resource] :as ctx} to existing overwrite depth move?]
+  [{:keys [backend path resource] :as ctx} to existing overwrite depth move?]
   (cond
     (and existing (= "F" overwrite))
     (ring/text 412 "The destination exists and Overwrite is F")
@@ -479,17 +574,20 @@
     (ring/text 403 "The destination exists and can't be deleted")
 
     ;; RFC 4918, sections 9.8.4 and 9.9.3: an overwritten destination is
-    ;; deleted first, so a collection keeps no members of its own
+    ;; deleted first, so a collection keeps no members of its own. Section
+    ;; 7.6: a lock doesn't follow its resource to the destination.
     :else
     (async/then (when existing ((:delete! backend) to))
                 (fn [not-deleted]
                   (or (failures ctx not-deleted)
-                      (async/then (transfer! ctx to resource depth move?)
-                                  (fn [failed]
-                                    (or (failures ctx failed)
-                                        {:status  (if existing 204 201)
-                                         :headers {}
-                                         :body    ""}))))))))
+                      (do (when existing (release! ctx to))
+                          (async/then (transfer! ctx to resource depth move?)
+                                      (fn [failed]
+                                        (or (failures ctx failed)
+                                            (do (when move? (release! ctx path))
+                                                {:status  (if existing 204 201)
+                                                 :headers {}
+                                                 :body    ""}))))))))))
 
 (defn- transfer-to
   "The answer to a COPY, or a MOVE when `move?`, of the resource of `ctx`
@@ -509,8 +607,10 @@
        (ring/text 403 "The destination is inside the source")
 
        :else
-       (unless (precondition-failure ctx resource)
-               #(transfer-answer ctx to existing overwrite depth move?))))))
+       (checked ctx resource (concat [(paths/parent to)]
+                                     (subtree ctx to)
+                                     (when move? (cons (paths/parent path) (subtree ctx path))))
+                #(transfer-answer ctx to existing overwrite depth move?))))))
 
 ;; RFC 4918, sections 9.8, 9.9, 10.3 and 10.6
 (defn- transfer-response
@@ -563,12 +663,22 @@
                          children)))
     [[path resource]]))
 
+;; RFC 4918, section 15.8: DAV:lockdiscovery lists the locks that cover a
+;; resource, those of the collections above it included
+(defn- with-locks
+  "The `resource` map of the resource at `path` with the active locks that
+  cover it, when the handler of `ctx` takes locks."
+  [{:keys [opts locks now] :as ctx} path resource]
+  (cond-> resource
+    (:locks opts) (assoc ::props/activelocks
+                         (mapv #(locks/activelock % now) (locks/covering locks path)))))
+
 (defn propstats
   "The propstats of the resource at `path`, whose map is `resource`, for
   the `propfind`, as xml/read-propfind returns it, in the context `ctx`
   of a request. A method of your own can use it, e.g. for a REPORT."
   [ctx propfind path resource]
-  (props/propstats ctx propfind path resource))
+  (props/propstats ctx propfind path (with-locks ctx path resource)))
 
 ;; RFC 8144, section 2.1
 (defn- minimal
@@ -690,16 +800,16 @@
 ;; RFC 4918, section 9.2
 (defn- proppatch-response
   "The answer to PROPPATCH for the resource of `ctx`."
-  [{:keys [request resource] :as ctx}]
+  [{:keys [request path resource] :as ctx}]
   (if (nil? resource)
     (not-found)
-    (unless (precondition-failure ctx resource)
-            #(let [{:keys [tree response]} (read-xml ctx)
-                   ops                     (some-> tree xml/read-propertyupdate)]
-               (cond
-                 response     response
-                 (empty? ops) (ring/text 400 "The body isn't a DAV:propertyupdate")
-                 :else        (patch ctx ops (preferences (:headers request))))))))
+    (checked ctx resource [path]
+             #(let [{:keys [tree response]} (read-xml ctx)
+                    ops                     (some-> tree xml/read-propertyupdate)]
+                (cond
+                  response     response
+                  (empty? ops) (ring/text 400 "The body isn't a DAV:propertyupdate")
+                  :else        (patch ctx ops (preferences (:headers request))))))))
 
 ;; RFC 9110, sections 15.5.6 and 15.6.2
 (defn- unknown-response
@@ -712,6 +822,151 @@
        (:request-method request))
     (not-allowed ctx)
     (ring/text 501 "Not Implemented")))
+
+(defn- lock-answer
+  "The answer of `status` to a LOCK of `ctx`, with the DAV:lockdiscovery
+  of the `taken` locks and the `headers`."
+  [{:keys [now] :as ctx} status taken headers]
+  (-> (xml-response ctx status [:dav/prop {} (into [:dav/lockdiscovery {}]
+                                                    (map #(locks/activelock % now))
+                                                    taken)])
+      (update :headers merge headers)))
+
+(defn- new-lock
+  "The lock that the LOCK of `ctx` asks for, by the `lockinfo` of its body
+  and at `depth`. A document is locked at depth 0, whatever is asked."
+  [{:keys [request opts path resource now] :as ctx} {:keys [scope owner] :as lockinfo} depth]
+  (let [seconds (locks/timeout (get-in request [:headers "timeout"]) (:max-lock-seconds opts))]
+    {:token     (locks/token)
+     :path      path
+     :href      (paths/href (:root opts) path (:collection? resource))
+     :depth     (if (:collection? resource) depth 0)
+     :scope     scope
+     :owner     owner
+     :timeout   seconds
+     :expires   (+ now (* 1000 seconds))
+     :principal ((:principal opts) request)}))
+
+(defn- take-lock!
+  "Add the `lock` to the lock table of the handler of `ctx` and drop the
+  locks that have expired, unless a live lock conflicts with it. It
+  returns the conflicting locks, or nil when it took the lock."
+  [{:keys [opts now] :as ctx} lock]
+  (let [conflicting (volatile! nil)]
+    (swap! (:locks opts)
+           (fn [table]
+             (let [live  (into {} (remove #(< (:expires (val %)) now)) table)
+                   found (seq (locks/conflicts (vals live) lock))]
+               (vreset! conflicting found)
+               (if found live (assoc live (:token lock) lock)))))
+    @conflicting))
+
+(defn- unlock!
+  "Remove the lock of `token` from the lock table of the handler of
+  `ctx`."
+  [{:keys [opts] :as ctx} token]
+  (swap! (:locks opts) dissoc token))
+
+;; RFC 4918, sections 9.10.1, 9.10.4 and 9.10.6
+(defn- lock-new
+  "The answer to a LOCK of `ctx` that takes a new lock by the `lockinfo`
+  at `depth`. An unmapped URL gets an empty document, as section 9.10.4
+  asks."
+  [{:keys [backend path resource] :as ctx} lockinfo depth]
+  (let [lock   (new-lock ctx lockinfo depth)
+        answer #(lock-answer ctx % [lock] {"Lock-Token" (str "<" (:token lock) ">")})]
+    (if-let [conflicting (take-lock! ctx lock)]
+      (xml-response ctx 423 (xml/error [(into [:dav/no-conflicting-lock {}]
+                                              (map #(vector :dav/href {} (:href %)))
+                                              conflicting)]))
+      (if resource
+        (answer 200)
+        (async/then (ring/attempt #((:put! backend) path (bytes/encode "") {}))
+                    (fn [result]
+                      (if-let [refused (::ring/refused result)]
+                        (do (unlock! ctx (:token lock))
+                            (refusal ctx refused))
+                        (answer 201))))))))
+
+;; RFC 4918, section 9.10.2
+(defn- lock-refresh
+  "The answer to a LOCK of `ctx` without a body, which refreshes the locks
+  that cover its resource and whose tokens its If header submits."
+  [{:keys [request opts path locks now] :as ctx}]
+  (let [seconds   (locks/timeout (get-in request [:headers "timeout"]) (:max-lock-seconds opts))
+        refreshed (for [lock (locks/covering locks path)
+                        :when (mine? ctx lock)]
+                    (assoc lock :timeout seconds :expires (+ now (* 1000 seconds))))]
+    (cond
+      (not (contains? (:headers request) "if"))
+      (ring/text 400 "A LOCK without a body refreshes the locks whose tokens its If header submits")
+
+      (empty? refreshed)
+      (xml-response ctx 412 (xml/error [:dav/lock-token-matches-request-uri]))
+
+      :else
+      (do (swap! (:locks opts)
+                 (fn [table]
+                   (reduce #(cond-> %1 (contains? %1 (:token %2)) (assoc (:token %2) %2))
+                           table
+                           refreshed)))
+          (lock-answer ctx 200 refreshed {})))))
+
+;; RFC 4918, section 9.10
+(defn- lock-response
+  "The answer to LOCK for the resource of `ctx`."
+  [{:keys [request backend opts resource] :as ctx}]
+  (let [depth (depth (:headers request) :infinity)]
+    (cond
+      (nil? (:locks opts))  (unknown-response ctx)
+      (#{:invalid 1} depth) (ring/text 400 "The Depth of a LOCK is 0 or infinity")
+      :else
+      (let [{:keys [tree response]} (read-xml ctx)
+            lockinfo                (some-> tree locks/read-lockinfo)]
+        (cond
+          response
+          response
+
+          (nil? tree)
+          (unless (precondition-failure ctx resource) #(lock-refresh ctx))
+
+          (nil? lockinfo)
+          (ring/text 400 "The body isn't a DAV:lockinfo of a write lock")
+
+          resource
+          (unless (precondition-failure ctx resource) #(lock-new ctx lockinfo depth))
+
+          (not (capable? backend :put))
+          (not-allowed ctx)
+
+          :else
+          (unless (parent-failure ctx)
+                  #(unless (precondition-failure ctx nil)
+                           (fn [] (lock-new ctx lockinfo depth)))))))))
+
+;; RFC 4918, section 9.11
+(defn- unlock-response
+  "The answer to UNLOCK for the resource of `ctx`."
+  [{:keys [request opts path locks] :as ctx}]
+  (let [token (locks/coded-url (get-in request [:headers "lock-token"]))
+        lock  (some #(when (= token (:token %)) %) locks)]
+    (cond
+      (nil? (:locks opts))
+      (unknown-response ctx)
+
+      (nil? token)
+      (ring/text 400 "An UNLOCK needs a Lock-Token header")
+
+      (or (nil? lock) (not (locks/covers? lock path)))
+      (xml-response ctx 409 (xml/error [:dav/lock-token-matches-request-uri]))
+
+      ;; RFC 4918, section 6.4
+      (not= ((:principal opts) request) (:principal lock))
+      (ring/text 403 "Only the principal that took the lock can remove it")
+
+      :else
+      (do (unlock! ctx token)
+          {:status 204 :headers {} :body ""}))))
 
 (defn- respond
   "The answer to the request of `ctx` by its method."
@@ -730,6 +985,8 @@
         :move      (transfer-response ctx true)
         :propfind  (propfind-response ctx)
         :proppatch (proppatch-response ctx)
+        :lock      (lock-response ctx)
+        :unlock    (unlock-response ctx)
         (unknown-response ctx)))))
 
 (defn- answer
@@ -738,7 +995,14 @@
   [backend opts request]
   (let [request (update request :headers ring/lower-case-headers)
         path    (paths/parse (:root opts) (:uri request))
-        ctx     {:request request :backend backend :opts opts :path path}]
+        now     (inst-ms ((:clock opts)))
+        ctx     {:request   request
+                 :backend   backend
+                 :opts      opts
+                 :path      path
+                 :now       now
+                 :locks     (some-> (:locks opts) deref vals (locks/live now))
+                 :submitted (submitted request)}]
     (cond
       (nil? path)       (not-found)
       (= :invalid path) (ring/text 400 "The path has a segment that can't name a resource")

@@ -28,13 +28,12 @@ Scope
 
 | Spec | What webdav-clj does with it |
 |---|---|
-| [RFC 4918](https://www.rfc-editor.org/rfc/rfc4918) WebDAV | class 1 for client and server: GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, OPTIONS, multistatus and the If header |
+| [RFC 4918](https://www.rfc-editor.org/rfc/rfc4918) WebDAV | class 1 for client and server: GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, OPTIONS, multistatus and the If header; and class 2, LOCK and UNLOCK, when the handler gets a lock table |
 | [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), section 13 | ETags and conditional requests, evaluated in the order of section 13.2.2 |
 | [RFC 8144](https://www.rfc-editor.org/rfc/rfc8144) Prefer in WebDAV | return=minimal for PROPFIND and PROPPATCH, and depth-noroot |
 | [RFC 5397](https://www.rfc-editor.org/rfc/rfc5397) current-user-principal | a live property that the app computes, through the handler's :live-properties |
 | [RFC 4331](https://www.rfc-editor.org/rfc/rfc4331) quota | the same, e.g. so that Finder and Windows show the free space |
-| [RFC 6578](https://www.rfc-editor.org/rfc/rfc6578) WebDAV Sync | the next release but one, in this library |
-| RFC 4918 class 2 | the next release |
+| [RFC 6578](https://www.rfc-editor.org/rfc/rfc6578) WebDAV Sync | later, in this library |
 | [RFC 4791](https://www.rfc-editor.org/rfc/rfc4791) CalDAV, [RFC 6352](https://www.rfc-editor.org/rfc/rfc6352) CardDAV | libraries of their own that build on this one |
 
 **Prefer belongs here, and comes in the first release.** RFC 8144 only
@@ -90,9 +89,10 @@ Whether a desktop can write to a share depends on class 2:
 - **Sync clients** such as like-minded, Joplin, Zotero, KeePassXC and
   Obsidian's Remotely Save need class 1 alone.
 
-So the first release serves sync clients and the Linux file managers,
-and class 2 should come next if Finder or Office matter. The podcast
-server's `/dav/` is for like-minded's sync, which class 1 covers.
+So class 1 serves sync clients and the Linux file managers, and class 2
+lets Finder and Office write too. The podcast server's `/dav/` is for
+like-minded's sync, which takes no locks, so it can leave the lock table
+out.
 
 
 The design
@@ -264,7 +264,9 @@ of RFC 4918, section 10.4.
 - If-Match uses the strong comparison and If-None-Match the weak one, as
   RFC 9110 says. The If header uses the weak one, which section 10.4.4
   allows, so that its example with `W/"A weak ETag"` can match.
-- A class 1 server has no lock tokens, so a state token never matches,
+- A lock token matches anywhere in the scope of its lock, an unmapped URL
+  included, so a PUT of a new member of a locked collection can submit
+  the collection's token untagged. Without a lock table no token matches,
   and `(Not <DAV:no-lock>)` is always true.
 - A tagged list names its resource by URL. The handler resolves it as it
   resolves a Destination, and an unmapped URL is a resource without the
@@ -273,6 +275,35 @@ of RFC 4918, section 10.4.
 The ETag of a resource map is an entity tag, e.g. `"\"v1\""` or
 `W/"v1"`. Any other value is quoted, so a backend can give a version
 number, as like-minded's numbered stores do.
+
+### Locks
+
+**The lock table is an atom, given as :locks.** Without it the handler is
+class 1. It's a map of locks by token, which the handler swaps
+atomically, so two LOCKs can't both win, and nothing runs in the
+background: an expired lock simply stops counting, and the next LOCK
+drops it. The table lives in memory rather than in the backend, since
+locks last minutes (an hour at most, by :max-lock-seconds) and a client
+takes a new one after a restart. A share served by several processes
+needs them to share the atom, or one handler in front.
+
+**A lock covers paths.** It covers its root, and with depth infinity
+everything below it, mapped or not. A write must hold a lock that covers
+each path it changes: the resource itself and, when it adds or removes a
+member, the collection above it. A DELETE or a MOVE also changes the
+locked resources below what it removes. Holding a lock means submitting
+its token in the If header, as the :principal that took it (section
+6.4), which is a function of the request, e.g. of the user that the login
+found.
+
+**The order of the checks follows litmus.** A failed If header is a 412
+before a lock without its token is a 423, so `(<DAV:no-lock> [etag])`
+gets the 412 that litmus expects.
+
+**A LOCK of an unmapped URL makes an empty document,** as section 9.10.4
+says, so the backend needs :put! for it. A DELETE destroys the locks of
+what it deletes, a MOVE leaves its locks behind, and a COPY doesn't copy
+them, as sections 7.6 and 9.6 say.
 
 ### XML
 
@@ -465,23 +496,23 @@ Docker wasn't running here, so `dev/litmus.sh` builds it from source:
    [notroj.github.io/litmus](https://notroj.github.io/litmus/), checks
    its SHA-256 and builds it with its own copy of neon, without TLS, into
    `target/litmus`.
-2. It starts the handler over a memory backend on Jetty at
-   `http://localhost:8765/dav/` with `clojure -M:litmus`.
+2. It starts the handler over a memory backend and a lock table on Jetty
+   at `http://localhost:8765/dav/` with `clojure -M:litmus`.
 3. It runs the basic, copymove, props, locks and http suites and stops
    the server.
 
 To repeat the run, install a C compiler (the Xcode command-line tools on
 macOS) and run `dev/litmus.sh`. It takes about 20 seconds, and the CI
 workflow runs it too. On 13 October 2026, with Jetty 12.1.0 on Java 24
-and macOS, it gave this:
+and macOS, every suite passed without a warning:
 
 | Suite | Result |
 |---|---|
-| basic | 16 of 16 passed, with a warning that the server isn't class 2 |
+| basic | 16 of 16 passed |
 | copymove | 13 of 13 passed |
 | props | 33 of 33 passed |
 | http | 4 of 4 passed |
-| locks | skipped after OPTIONS, as litmus does for a class 1 server |
+| locks | 40 of 40 passed |
 
 The memory backend has a `:move!` of its own but no `:copy!`, so litmus
 tests the handler's own copying, dead properties included.
@@ -492,7 +523,8 @@ tests the handler's own copying, dead properties included.
   Nextcloud and Apache's mod_dav, and a listing written by hand in the
   default namespace with absolute hrefs, in `test/resources/webdav`.
 - **The handler,** method by method over the memory backend, with the
-  litmus cases that don't need a network.
+  litmus cases that don't need a network, and its locks: of documents and
+  collections, shared and exclusive, by principal and until they expire.
 - **The client against the handler,** in-process on every platform, and
   over HTTP on the JVM through `com.sun.net.httpserver`, which Java 11
   has, so the floor job needs no Jetty.
@@ -512,10 +544,10 @@ failed. Each one is fixed and has a test.
 
 `dev/record.sh` runs Nextcloud 34.0.4 and Apache 2.4.69 with mod_dav in
 Docker, on localhost alone, and records their answers to a listing, a
-PROPPATCH and a failing precondition. The tests check what stays the
-same from one recording to the next, e.g. names and sizes rather than
-ETags, so recording again needs no change to them. A hosted Fastmail or
-Hetzner storage box would cost money, so they wait.
+PROPPATCH, a failing precondition and, from mod_dav, a LOCK. The tests
+check what stays the same from one recording to the next, e.g. names and
+sizes rather than ETags, so recording again needs no change to them. A
+hosted Fastmail or Hetzner storage box would cost money, so they wait.
 
 The real answers differed from what their documentation had led me to
 write:
@@ -525,6 +557,9 @@ write:
 - mod_dav refuses a protected property with a 409 rather than a 403, and
   depth infinity with a page of HTML rather than a DAV:error.
 - mod_dav's ETags are weak for a second after a write.
+- mod_dav's answer to a LOCK has no DAV:lockroot, its token is an
+  opaquelocktoken, and a document's lock has the depth infinity that the
+  LOCK asked for.
 
 
 Nice-to-haves
@@ -557,7 +592,8 @@ The questions of this proposal, as Simon settled them on 13 October
    are for storage alone, through `xml/clark`.
 2. **Class 2 comes next.** It lets Finder and Office write, and litmus's
    locks suite is ready to test it. Sync waits for CalDAV, which waits
-   for ical-clj.
+   for ical-clj. Since there'll be no release for each part, class 2 is
+   in the first one, and it passes litmus's locks suite.
 3. **CalDAV and CardDAV get libraries of their own,** caldav-clj and
    carddav-clj, on webdav-clj and ical-clj.
 4. **:max-bytes stays at 32 MB** while bodies are held in memory, and

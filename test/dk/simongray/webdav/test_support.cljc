@@ -75,16 +75,19 @@
 (defn expect
   "A step that sends the Ring `request` to the `handler` and checks the
   response against `expected`: a map of what it has (see matches?) or a
-  function of the response, which makes its own assertions."
+  function of the response, which makes its own assertions. The request
+  can be a function of no arguments that returns it when the step runs,
+  e.g. with a lock token from an earlier step."
   [handler request expected]
   (fn []
-    (async/then (handler request)
-                (fn [response]
-                  (if (fn? expected)
-                    (expected response)
-                    (is (matches? response expected)
-                        (str (name (:request-method request)) " " (:uri request)
-                             " gave " (pr-str (update response :body text)))))))))
+    (let [request (if (fn? request) (request) request)]
+      (async/then (handler request)
+                  (fn [response]
+                    (if (fn? expected)
+                      (expected response)
+                      (is (matches? response expected)
+                          (str (name (:request-method request)) " " (:uri request)
+                               " gave " (pr-str (update response :body text))))))))))
 
 (defn share
   "A handler at /dav/ over a new memory backend in the atom `a`, with the

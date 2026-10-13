@@ -63,8 +63,8 @@
 
 (defn apache!
   "Record the answers of the mod_dav share at `url`: an allprop listing, a
-  PROPPATCH of a protected and a dead property, and a PROPFIND at depth
-  infinity, which it refuses by default."
+  PROPPATCH of a protected and a dead property, a LOCK, and a PROPFIND at
+  depth infinity, which it refuses by default."
   [url]
   (let [share (str url "/dav/")
         notes (str share "notes/")]
@@ -78,6 +78,9 @@
              (send! :proppatch (str notes "report%20one.txt")
                     {:patch [[:set :dav/getetag "\"x\""]
                              [:set (keyword "http://example.com/ns/" "color") "blue"]]}))
+    (record! "apache-lock.xml" 200
+             (send! :lock (str notes "report%20one.txt")
+                    {:scope :exclusive :owner "webdav-clj" :timeout 600}))
     (record! "apache-403.xml" 403
              (send! :propfind notes {:depth :infinity}))))
 

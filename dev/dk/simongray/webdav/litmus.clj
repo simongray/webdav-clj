@@ -8,9 +8,9 @@
             [ring.adapter.jetty :as jetty]))
 
 (defn handler
-  "The handler over a new memory backend at /dav/."
+  "The handler over a new memory backend at /dav/, with locks."
   []
-  (server/handler (memory/backend) {:root "/dav/"}))
+  (server/handler (memory/backend) {:root "/dav/" :locks (atom {})}))
 
 (defn -main
   "Serve the handler on localhost at the port `port`, 8765 by default,

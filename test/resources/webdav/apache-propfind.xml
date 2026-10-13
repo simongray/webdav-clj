@@ -5,9 +5,9 @@
 <D:propstat>
 <D:prop>
 <lp1:resourcetype><D:collection/></lp1:resourcetype>
-<lp1:creationdate>2026-10-13T16:34:14Z</lp1:creationdate>
-<lp1:getlastmodified>Tue, 13 Oct 2026 16:34:14 GMT</lp1:getlastmodified>
-<lp1:getetag>W/"1000-65dbb6298514b"</lp1:getetag>
+<lp1:creationdate>2026-10-13T17:17:49Z</lp1:creationdate>
+<lp1:getlastmodified>Tue, 13 Oct 2026 17:17:49 GMT</lp1:getlastmodified>
+<lp1:getetag>W/"1000-65dbbfe79bba6"</lp1:getetag>
 <D:supportedlock>
 <D:lockentry>
 <D:lockscope><D:exclusive/></D:lockscope>
@@ -29,10 +29,10 @@
 <D:propstat>
 <D:prop>
 <lp1:resourcetype/>
-<lp1:creationdate>2026-10-13T16:34:14Z</lp1:creationdate>
+<lp1:creationdate>2026-10-13T17:17:49Z</lp1:creationdate>
 <lp1:getcontentlength>12</lp1:getcontentlength>
-<lp1:getlastmodified>Tue, 13 Oct 2026 16:34:14 GMT</lp1:getlastmodified>
-<lp1:getetag>W/"c-65dbb62984593"</lp1:getetag>
+<lp1:getlastmodified>Tue, 13 Oct 2026 17:17:49 GMT</lp1:getlastmodified>
+<lp1:getetag>W/"c-65dbbfe79b3d6"</lp1:getetag>
 <lp2:executable>F</lp2:executable>
 <D:supportedlock>
 <D:lockentry>
@@ -55,9 +55,9 @@
 <D:propstat>
 <D:prop>
 <lp1:resourcetype><D:collection/></lp1:resourcetype>
-<lp1:creationdate>2026-10-13T16:34:14Z</lp1:creationdate>
-<lp1:getlastmodified>Tue, 13 Oct 2026 16:34:14 GMT</lp1:getlastmodified>
-<lp1:getetag>W/"1000-65dbb6298514b"</lp1:getetag>
+<lp1:creationdate>2026-10-13T17:17:49Z</lp1:creationdate>
+<lp1:getlastmodified>Tue, 13 Oct 2026 17:17:49 GMT</lp1:getlastmodified>
+<lp1:getetag>W/"1000-65dbbfe79bba6"</lp1:getetag>
 <D:supportedlock>
 <D:lockentry>
 <D:lockscope><D:exclusive/></D:lockscope>

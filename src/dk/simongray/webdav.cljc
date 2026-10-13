@@ -17,6 +17,7 @@
             [dk.simongray.wary-fetch.headers :as headers]
             [dk.simongray.webdav.conditions :as conditions]
             [dk.simongray.webdav.impl.dates :as dates]
+            [dk.simongray.webdav.impl.locks :as locks]
             [dk.simongray.webdav.paths :as paths]
             [dk.simongray.webdav.xml :as xml]
             [dk.simongray.whatwg-url :as url]))
@@ -62,6 +63,33 @@
   (cond-> {"Destination" (or (url/resolve url destination) destination)}
     (false? overwrite?) (assoc "Overwrite" "F")))
 
+;; RFC 4918, sections 10.4 and 10.5
+(defn- lock-token-headers
+  "The header that submits the :lock-token of `opts` with the `method`:
+  Lock-Token for an UNLOCK, and else an If header of that token alone,
+  unless `opts` give an :if of their own."
+  [method {:keys [lock-token] :as opts}]
+  (cond
+    (= :unlock method) {"Lock-Token" (str "<" lock-token ">")}
+    (:if opts)         {}
+    :else              {"If" (str "(<" lock-token ">)")}))
+
+;; RFC 4918, section 14.11
+(defn- lockinfo
+  "The Hiccup of a DAV:lockinfo of a write lock of the `scope`, :exclusive
+  or :shared, by the `owner`: text, an element or nil."
+  [scope owner]
+  (cond-> [:dav/lockinfo {}
+           [:dav/lockscope {} [(keyword "dav" (name scope)) {}]]
+           [:dav/locktype {} [:dav/write {}]]]
+    owner (conj (xml/property :dav/owner owner))))
+
+;; RFC 4918, section 10.7
+(defn- timeout-header
+  "The Timeout header of the `timeout`, in seconds or :infinite."
+  [timeout]
+  (if (= :infinite timeout) "Infinite" (str "Second-" timeout)))
+
 (defn request
   "The request map of the `method`, e.g. :propfind, to the `url`, with the
   `opts` below. Any method works, e.g. a :report of CalDAV.
@@ -75,6 +103,8 @@
   - :if-match and :if-none-match, an ETag or *
   - :if, an If header, as text or as conditions/parse-if returns it
   - :minimal?, true to prefer a minimal answer (RFC 8144)
+  - :lock-token, the token of a lock that the request holds, which goes
+    in an If header of its own
   - :namespaces, the aliases of namespaces in property names
   - :body, the body of a method without options of its own, e.g. :report
   - the options of wary-fetch's send!, e.g. :timeout-seconds
@@ -91,6 +121,11 @@
     `url`, and :overwrite? false to fail when it exists. A :copy takes
     :depth 0 for a collection alone.
   - :get takes :as :bytes for a body of bytes.
+  - :lock takes the :scope (:exclusive or :shared) and the :owner (text
+    or an element) of a new lock, and its :timeout in seconds or
+    :infinite. Without a :scope it refreshes the lock of its
+    :lock-token.
+  - :unlock takes the :lock-token of the lock to remove.
 
       (request :propfind \"https://dav.example.org/notes/\"
                {:depth 1 :props [:dav/getetag :dav/resourcetype]})"
@@ -104,8 +139,9 @@
                                              :url     url
                                              :headers (common-headers opts)}
                            opts)
-                   (seq namespaces) (assoc :namespaces namespaces)
-                   as               (assoc :as as))]
+                   (:lock-token opts) (update :headers merge (lock-token-headers method opts))
+                   (seq namespaces)   (assoc :namespaces namespaces)
+                   as                 (assoc :as as))]
      (case method
        :propfind  (xml-body base (xml/propfind opts) namespaces)
        :proppatch (xml-body base (xml/propertyupdate (:patch opts)) namespaces)
@@ -114,6 +150,9 @@
                     (assoc-in [:headers "Content-Type"] (:content-type opts)))
        (:copy
         :move)    (update base :headers merge (transfer-headers url opts))
+       :lock      (cond-> base
+                    (:timeout opts) (assoc-in [:headers "Timeout"] (timeout-header (:timeout opts)))
+                    (:scope opts)   (xml-body (lockinfo (:scope opts) (:owner opts)) namespaces))
        (cond-> base
          (some? body) (assoc :body body))))))
 
@@ -143,6 +182,17 @@
   [status]
   (and status (<= 200 status 299)))
 
+;; RFC 4918, section 15.8
+(defn- activelocks
+  "The locks in the value of DAV:lockdiscovery, as maps of their :token,
+  the :root href, :scope, :depth, :timeout in seconds (or :infinite) and
+  :owner element."
+  [lockdiscovery]
+  (into []
+        (comp (filter #(and (vector? %) (= :dav/activelock (first %))))
+              (map locks/read-activelock))
+        (when (sequential? lockdiscovery) lockdiscovery)))
+
 ;; RFC 4918, section 15: the live properties in a resource map's keys
 (defn- with-live-keys
   "The resource map `m` with the keys of the live properties among its
@@ -169,7 +219,10 @@
       (assoc :last-modified (dates/parse-http-date (trimmed (:dav/getlastmodified props))))
 
       (some-> (:dav/creationdate props) trimmed dates/parse-timestamp)
-      (assoc :created (dates/parse-timestamp (trimmed (:dav/creationdate props)))))))
+      (assoc :created (dates/parse-timestamp (trimmed (:dav/creationdate props))))
+
+      (contains? props :dav/lockdiscovery)
+      (assoc :locks (activelocks (:dav/lockdiscovery props))))))
 
 (defn resource
   "The resource map of a `response` of a multistatus, as xml/read-multistatus
@@ -183,7 +236,10 @@
     for one that isn't there
   - :status and :error, when the response has them
   - :collection?, :etag, :content-type, :content-length, :last-modified,
-    :created and :resource-type, from the live properties"
+    :created and :resource-type, from the live properties
+  - :locks, from DAV:lockdiscovery, as maps of each lock's :token, the
+    :root href, :scope, :depth, :timeout in seconds (or :infinite) and
+    :owner element"
   [url {:keys [href status propstats error] :as response}]
   (let [props  (into {} (for [{:keys [status props]} propstats
                               :when (success? status)
@@ -242,6 +298,20 @@
       (some-> (headers/header headers "last-modified") dates/parse-http-date)
       (assoc :last-modified (dates/parse-http-date (headers/header headers "last-modified"))))))
 
+;; RFC 4918, sections 9.10.6 and 10.5
+(defn- taken-lock
+  "The lock that the `response` to a LOCK took or refreshed: the one of
+  its Lock-Token header, or else the first in its DAV:lockdiscovery, read
+  by `namespaces`."
+  [{:keys [headers] :as response} namespaces]
+  (let [tree       (parse-xml response namespaces)
+        discovered (activelocks (some #(when (and (vector? %) (= :dav/lockdiscovery (first %)))
+                                         (xml/value %))
+                                      (drop 2 tree)))
+        token      (locks/coded-url (headers/header headers "lock-token"))]
+    (or (some #(when (= token (:token %)) %) discovered)
+        (first discovered))))
+
 ;; RFC 4918, section 10.1
 (defn- capabilities
   "The :dav classes and the :allow methods of the answer to OPTIONS."
@@ -261,6 +331,8 @@
   - 207: the :resources, as resource returns them, e.g. of a PROPFIND or
     of the members that a COPY or a DELETE couldn't change
   - a success of OPTIONS: the :dav classes and the :allow methods
+  - a success of LOCK: the :lock that it took or refreshed, as resource
+    gives its :locks
   - a success of GET or HEAD: the :content-type, :content-length and
     :last-modified, and the :body of a GET
   - an error with a DAV:error body: the precondition names as :error,
@@ -278,6 +350,9 @@
 
       (and (success? status) (= :options method))
       (merge base (capabilities response))
+
+      (and (success? status) (= :lock method))
+      (assoc base :lock (taken-lock response namespaces))
 
       (and (success? status) (#{:get :head} method))
       (cond-> (merge base (representation response))

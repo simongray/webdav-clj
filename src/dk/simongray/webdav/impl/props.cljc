@@ -5,6 +5,7 @@
   (:require [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.webdav.conditions :as conditions]
             [dk.simongray.webdav.impl.dates :as dates]
+            [dk.simongray.webdav.impl.locks :as locks]
             [dk.simongray.webdav.impl.ring :as ring]
             [dk.simongray.webdav.xml :as xml]))
 
@@ -12,13 +13,15 @@
   "The live properties of RFC 4918 that the handler computes from a
   resource map, in the order that allprop lists them."
   [:dav/creationdate :dav/getcontentlanguage :dav/getcontentlength
-   :dav/getcontenttype :dav/getetag :dav/getlastmodified :dav/resourcetype])
+   :dav/getcontenttype :dav/getetag :dav/getlastmodified :dav/resourcetype
+   :dav/lockdiscovery :dav/supportedlock])
 
-;; RFC 4918, sections 15.1 to 15.9
+;; RFC 4918, sections 15.1 to 15.10
 (defn live-value
   "The value of the live property `name` of the `resource`, or nil when it
   has none. DAV:resourcetype holds DAV:collection for a collection and an
-  empty element for each name in its :resource-type."
+  empty element for each name in its :resource-type. The locks are there
+  when the handler takes them, which gives the resource its ::activelocks."
   [name {:keys [collection? etag last-modified created content-length
                 content-type content-language resource-type]
          :as   resource}]
@@ -32,6 +35,9 @@
                               (str content-length))
     :dav/getcontenttype     content-type
     :dav/getcontentlanguage content-language
+    :dav/lockdiscovery      (::activelocks resource)
+    :dav/supportedlock      (when (contains? resource ::activelocks)
+                              locks/supportedlock)
     nil))
 
 (defn live
