@@ -1,0 +1,87 @@
+<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <d:response>
+    <d:href>/remote.php/dav/files/simon/notes/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getlastmodified>Tue, 13 Oct 2026 09:12:44 GMT</d:getlastmodified>
+        <d:resourcetype><d:collection/></d:resourcetype>
+        <d:getetag>&quot;68d6a1c2b3e4f&quot;</d:getetag>
+        <oc:fileid>00000123ocabcdef1234</oc:fileid>
+        <d:quota-used-bytes>4096</d:quota-used-bytes>
+        <d:quota-available-bytes>-3</d:quota-available-bytes>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+    <d:propstat>
+      <d:prop>
+        <d:getcontentlength/>
+        <d:getcontenttype/>
+      </d:prop>
+      <d:status>HTTP/1.1 404 Not Found</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/files/simon/notes/8f1c9e2a-7a4b-4c1d-9e2f-0a1b2c3d4e5f.edn</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getlastmodified>Tue, 13 Oct 2026 09:12:44 GMT</d:getlastmodified>
+        <d:getcontentlength>2048</d:getcontentlength>
+        <d:resourcetype/>
+        <d:getetag>&quot;a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6&quot;</d:getetag>
+        <d:getcontenttype>application/octet-stream</d:getcontenttype>
+        <oc:fileid>00000124ocabcdef1234</oc:fileid>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+    <d:propstat>
+      <d:prop>
+        <d:quota-used-bytes/>
+        <d:quota-available-bytes/>
+      </d:prop>
+      <d:status>HTTP/1.1 404 Not Found</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/files/simon/notes/laptop%20at%20home.edn</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getlastmodified>Mon, 12 Oct 2026 21:03:09 GMT</d:getlastmodified>
+        <d:getcontentlength>1024</d:getcontentlength>
+        <d:resourcetype/>
+        <d:getetag>&quot;0f9e8d7c6b5a4938271605f4e3d2c1b0&quot;</d:getetag>
+        <d:getcontenttype>application/octet-stream</d:getcontenttype>
+        <oc:fileid>00000125ocabcdef1234</oc:fileid>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+    <d:propstat>
+      <d:prop>
+        <d:quota-used-bytes/>
+        <d:quota-available-bytes/>
+      </d:prop>
+      <d:status>HTTP/1.1 404 Not Found</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/files/simon/notes/Archive/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getlastmodified>Sun, 11 Oct 2026 08:00:00 GMT</d:getlastmodified>
+        <d:resourcetype><d:collection/></d:resourcetype>
+        <d:getetag>&quot;fedcba9876543210&quot;</d:getetag>
+        <oc:fileid>00000126ocabcdef1234</oc:fileid>
+        <d:quota-used-bytes>0</d:quota-used-bytes>
+        <d:quota-available-bytes>-3</d:quota-available-bytes>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+    <d:propstat>
+      <d:prop>
+        <d:getcontentlength/>
+        <d:getcontenttype/>
+      </d:prop>
+      <d:status>HTTP/1.1 404 Not Found</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>

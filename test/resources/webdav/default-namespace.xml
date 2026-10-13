@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<multistatus xmlns="DAV:">
+  <response>
+    <href>https://dav.example.org/files/Shared%20Docs/</href>
+    <propstat>
+      <prop>
+        <displayname>Shared Docs</displayname>
+        <resourcetype><collection/></resourcetype>
+        <creationdate>2026-09-30T22:15:00+02:00</creationdate>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+  <response>
+    <href>https://dav.example.org/files/Shared%20Docs/caf%C3%A9.md</href>
+    <propstat>
+      <prop>
+        <displayname>café.md</displayname>
+        <resourcetype/>
+        <getetag>W/"77"</getetag>
+        <getcontentlength> 12 </getcontentlength>
+        <getlastmodified>Wednesday, 30-Sep-26 20:15:00 GMT</getlastmodified>
+        <x:color xmlns:x="http://example.com/ns/" xml:lang="en">blue</x:color>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+  <response>
+    <href>https://dav.example.org/files/Shared%20Docs/gone.md</href>
+    <status>HTTP/1.1 404 Not Found</status>
+  </response>
+</multistatus>

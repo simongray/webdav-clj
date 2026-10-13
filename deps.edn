@@ -1,0 +1,41 @@
+{:paths ["src"]
+
+ ;; Clojure 1.11 is the floor, and the tests run on it unless an alias says
+ ;; otherwise. wary-fetch sends the requests of the client, qname-hiccup
+ ;; reads and writes the XML bodies, and whatwg-url parses the hrefs and
+ ;; percent-encodes their paths.
+ :deps  {org.clojure/clojure       {:mvn/version "1.11.4"}
+         dk.simongray/wary-fetch   {:mvn/version "0.6.2"}
+         dk.simongray/qname-hiccup {:mvn/version "0.4.0"}
+         dk.simongray/whatwg-url   {:mvn/version "0.1.0"}}
+
+ :aliases
+ {;; clojure -X:test
+  :test {:extra-paths ["test" "test/resources"]
+         :extra-deps  {io.github.cognitect-labs/test-runner
+                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts   ["-m" "cognitect.test-runner"]
+         :exec-fn     cognitect.test-runner.api/test}
+
+  ;; clojure -M:cljs compile test  (the tests in Node)
+  :cljs {:extra-paths   ["test" "test/resources"]
+         :override-deps {org.clojure/clojure {:mvn/version "1.12.5"}}
+         :extra-deps    {thheller/shadow-cljs {:mvn/version "3.5.3"}}
+         :main-opts     ["-m" "shadow.cljs.devtools.cli"]}
+
+  ;; clojure -M:litmus  (the handler over a memory backend on Jetty, at
+  ;; http://localhost:8765/dav/, for dev/litmus.sh)
+  :litmus {:extra-paths ["dev"]
+           :extra-deps  {ring/ring-jetty-adapter {:mvn/version "1.15.3"}}
+           :main-opts   ["-m" "dk.simongray.webdav.litmus"]}
+
+  ;; clojure -M:test:litmus:nrepl
+  :nrepl {:extra-deps {nrepl/nrepl {:mvn/version "1.7.0"}}
+          ;; lets nrepl interrupt runaway evaluations
+          :jvm-opts   ["-Djdk.attach.allowAttachSelf"]
+          :main-opts  ["-m" "nrepl.cmdline"]}
+
+  ;; clojure -T:build jar | install | deploy  (see build.clj)
+  :build {:deps       {io.github.clojure/tools.build {:mvn/version "0.10.14"}
+                       slipset/deps-deploy            {:mvn/version "0.2.5"}}
+          :ns-default build}}}
