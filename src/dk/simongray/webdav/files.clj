@@ -16,13 +16,15 @@
   the directory, properties and all, and a COPY goes through the handler's
   own copying.
 
-  An ETag is the size and the time of the last change of a file, so two
-  writes of the same size within one tick of the file system's clock give
-  the same ETag. A symbolic link that leads out of the directory counts as
-  nothing there."
+  An ETag is the size, the time of the last change and the inode of a
+  file, where the file system has inodes. Each PUT makes a new file, so
+  its ETag differs from the last one even within one tick of the clock. A
+  symbolic link that leads out of the directory counts as nothing there,
+  and so does the backend's own directory by any other name, e.g. .WEBDAV
+  on a file system that ignores case."
   (:require [clojure.java.io :as io]
             [dk.simongray.webdav.xml :as xml])
-  (:import [java.io InputStream]
+  (:import [java.io InputStream IOException]
            [java.net URLConnection]
            [java.nio.file AtomicMoveNotSupportedException CopyOption Files
             FileVisitOption LinkOption NoSuchFileException OpenOption Path
@@ -46,23 +48,34 @@
   ^Path [^Path root path]
   (reduce #(.resolve ^Path %1 ^String %2) root path))
 
-(defn- inside?
-  "Whether the file `f` is the directory `root` or below it, once its
-  symbolic links are followed. A file that isn't there is inside when
-  its directory is."
+(defn- real
+  "The file `f` with its symbolic links followed. A file that isn't there
+  is its directory's real path and its name."
+  ^Path [^Path f]
+  (if (Files/exists f (make-array LinkOption 0))
+    (.toRealPath f (make-array LinkOption 0))
+    (some-> (.getParent f) (.toRealPath (make-array LinkOption 0)) (.resolve (.getFileName f)))))
+
+;; a file system that ignores case, as macOS's does by default, finds the
+;; backend's own directory by another name too
+(defn- own?
+  "Whether the real file `f` below the directory `root` is in the backend's
+  own directory, compared by file rather than by name."
   [^Path root ^Path f]
-  (let [real (if (Files/exists f (make-array LinkOption 0))
-               (.toRealPath f (make-array LinkOption 0))
-               (some-> (.getParent f) (.toRealPath (make-array LinkOption 0)) (.resolve (.getFileName f))))]
-    (boolean (some-> real (.startsWith root)))))
+  (let [top (.resolve root (.getName (.relativize root f) 0))]
+    (and (Files/exists top (make-array LinkOption 0))
+         (Files/isSameFile top (.resolve root ^String own-dir)))))
 
 (defn- file-of
   "The file of the share's `path` below the directory `root`, or nil when
-  it's the backend's own directory or leads out of `root`."
+  it's in the backend's own directory or leads out of `root`."
   ^Path [^Path root path]
   (when-not (= own-dir (first path))
     (let [f (resolved root path)]
-      (when (try (inside? root f) (catch NoSuchFileException _ false))
+      (when (try
+              (let [r (real f)]
+                (and r (.startsWith r root) (not (own? root r))))
+              (catch NoSuchFileException _ false))
         f))))
 
 (defn- writable
@@ -90,6 +103,7 @@
       (let [modified (.lastModifiedTime a)]
         (cond-> {:etag           (str "\"" (Long/toHexString (.size a)) "-"
                                       (Long/toHexString (.to modified TimeUnit/NANOSECONDS))
+                                      (some->> (.fileKey a) .hashCode Integer/toHexString (str "-"))
                                       "\"")
                  :content-length (.size a)
                  :created        (Date. (.toMillis (.creationTime a)))
@@ -200,6 +214,11 @@
          :as   opts}]
    (let [root (.toRealPath (.toPath (io/file dir)) (make-array LinkOption 0))
          lock (Object.)]
+     ;; made now, so that no request can make it first by another name; a
+     ;; directory that can't be written to has nothing to keep there
+     (try
+       (Files/createDirectories (.resolve root ^String own-dir) (make-array FileAttribute 0))
+       (catch IOException _))
      {:resource     (fn [path]
                       (some-> (file-of root path) (resource content-type)))
       :children     (fn [path]

@@ -50,11 +50,18 @@
          (expect h (ring :propfind "/dav/" :headers {"Depth" "1"})
                  #(is (not (re-find #"\.webdav" (text (:body %)))) "its own directory isn't listed"))
          (expect h (ring :get "/dav/.webdav/tmp") {:status 404})
+         (expect h (ring :propfind "/dav/.WEBDAV/" :headers {"Depth" "0"}) {:status 404})
+         (expect h (ring :put "/dav/.WEBDAV/props/a.txt.xml" :body (stream "<x/>")) {:status 409})
          (expect h (ring :put "/dav/a.txt" :body (stream "12345")) {:status 413})
          (expect h (ring :get "/dav/a.txt") {:status 200})
          (fn []
            (is (= "1234" (slurp (io/file (.toFile dir) "a.txt"))) "a body past the limit changes nothing")
            (is (empty? (.list (io/file (.toFile dir) ".webdav" "tmp"))) "and leaves no file behind")))))
+
+(deftest etags-of-quick-writes
+  (let [put! (:put! (files/backend (.toFile (temp-dir))))]
+    (is (apply distinct? (for [s ["1" "2" "3"]]
+                           (:etag (put! ["a.txt"] (stream s) {})))))))
 
 (deftest a-write-that-raced
   (let [dir     (temp-dir)

@@ -260,9 +260,13 @@ lines, and litmus tests a real file system as well as memory.
   get lost when tools copy files.
 - **A PUT writes to a temporary file and moves it into place,** so a body
   that's refused or broken off leaves the old file as it was.
-- **An ETag is the size and the time of the last change,** since hashing
-  every file for a PROPFIND would read the whole share. Two writes of the
-  same size within one tick of the clock share an ETag.
+- **An ETag is the size, the time of the last change and the inode,**
+  since hashing every file for a PROPFIND would read the whole share.
+  Each PUT makes a new file, so its ETag differs from the last one even
+  within one tick of a coarse clock.
+- **The backend finds its own directory by file, not by name,** since a
+  file system that ignores case, as macOS's does, also finds it as
+  `.WEBDAV`.
 - **A MOVE renames, and a COPY goes through the handler,** which copies
   the dead properties too.
 - **A symbolic link that leads out of the directory counts as nothing,**
