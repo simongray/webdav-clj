@@ -50,7 +50,7 @@
         token (atom nil)]
     (run (expect h (ring :options "/dav/")
                  {:headers {"DAV"   "1, 2"
-                            "Allow" "OPTIONS, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, LOCK, UNLOCK"}})
+                            "Allow" "OPTIONS, GET, HEAD, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, LOCK, UNLOCK"}})
          (expect h (ring :put "/dav/a.txt" :body "a") {:status 201})
          (expect h (ring :lock "/dav/a.txt" :headers {"Timeout" "Second-600"}
                          :body (lockinfo :exclusive "me"))

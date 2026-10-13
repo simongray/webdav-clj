@@ -22,7 +22,8 @@
     map of the :depth (0 or :infinity)
 
   Only :resource is required. Without :children the handler won't list a
-  collection, and without :put!, :mkcol! or :delete! it refuses those
+  collection, neither for PROPFIND nor as the page of links that a GET of
+  one answers, and without :put!, :mkcol! or :delete! it refuses those
   methods. Without :copy! and :move! it copies with the other functions,
   and moves by copying and deleting.
 
@@ -67,6 +68,7 @@
             [dk.simongray.webdav.conditions :as conditions]
             [dk.simongray.webdav.impl.copy :as copy]
             [dk.simongray.webdav.impl.dates :as dates]
+            [dk.simongray.webdav.impl.html :as html]
             [dk.simongray.webdav.impl.locks :as locks]
             [dk.simongray.webdav.impl.props :as props]
             [dk.simongray.webdav.impl.ring :as ring]
@@ -185,6 +187,7 @@
   (let [document? (and resource (not (:collection? resource)))]
     (->> (concat ["OPTIONS"]
                  (when document? [:get "HEAD"])
+                 (when (and (:collection? resource) (not (unlisted? ctx))) ["GET" "HEAD"])
                  (when (or document? (not resource)) [:put])
                  (when resource [:delete])
                  ["PROPFIND" "PROPPATCH"]
@@ -482,13 +485,38 @@
                        :headers (representation resource)
                        :body    (ring/body content)}))))))
 
-;; RFC 9110, sections 9.3.1 and 9.3.2; RFC 4918, section 9.4
+(defn- index-answer
+  "The answer to the GET or HEAD of `ctx` on a collection: a page of links
+  to its parent and its members."
+  [{:keys [request opts path] :as ctx}]
+  (async/then (children-at ctx path)
+              (fn [children]
+                (let [root (:root opts)
+                      href #(paths/href root %1 %2)]
+                  {:status  200
+                   :headers {"Content-Type" "text/html; charset=utf-8"}
+                   :body    (when (= :get (:request-method request))
+                              (html/index (str root (str/join "/" path) (when (seq path) "/"))
+                                          (concat
+                                            (when (seq path)
+                                              [[(href (paths/parent path) true) "../"]])
+                                            (for [{:keys [name collection?]} (sort-by :name children)]
+                                              [(href (conj (vec path) name) collection?)
+                                               (cond-> name collection? (str "/"))]))))}))))
+
+;; RFC 9110, sections 9.3.1 and 9.3.2; RFC 4918, section 9.4, which leaves
+;; a GET of a collection to the server
 (defn- get-response
   "The answer to GET or HEAD for the resource of `ctx`."
   [{:keys [request backend resource] :as ctx}]
   (cond
-    (nil? resource)         (not-found)
-    (:collection? resource) (not-allowed ctx)
+    (nil? resource)   (not-found)
+    (unlisted? ctx)   (not-allowed ctx)
+
+    ;; the page of a collection has no validators of its own
+    (:collection? resource)
+    (unless (precondition-failure ctx (dissoc resource :etag :last-modified))
+            #(index-answer ctx))
 
     (and (= :get (:request-method request)) (not (capable? backend :get)))
     (not-allowed ctx)

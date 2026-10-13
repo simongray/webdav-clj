@@ -123,7 +123,8 @@ backend serves a directory:
 ```
 
 It keeps the dead properties and the bodies that are being written in a
-`.webdav` directory of its own, which no request reaches. The memory
+`.webdav` directory of its own, which no request reaches. A browser that
+opens a collection gets a plain page of links to its members. The memory
 backend in `dk.simongray.webdav.memory` serves an atom instead, on every
 platform, e.g. for tests.
 

@@ -48,14 +48,14 @@
     (run (expect h (ring :options "/dav/")
                  {:status  200
                   :headers {"DAV"           "1"
-                            "Allow"         "OPTIONS, DELETE, PROPFIND, PROPPATCH, COPY, MOVE"
+                            "Allow"         "OPTIONS, GET, HEAD, DELETE, PROPFIND, PROPPATCH, COPY, MOVE"
                             "MS-Author-Via" "DAV"}})
          (expect h (ring :options "/dav/new.txt")
                  {:headers {"Allow" "OPTIONS, PUT, PROPFIND, PROPPATCH, MKCOL"}})
          (expect (share (atom {}) {:compliance ["calendar-access"] :methods {:report (constantly nil)}})
                  (ring :options "/dav/")
                  {:headers {"DAV"   "1, calendar-access"
-                            "Allow" "OPTIONS, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, REPORT"}}))))
+                            "Allow" "OPTIONS, GET, HEAD, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, REPORT"}}))))
 
 (deftest paths
   (let [h (share)]
@@ -84,12 +84,35 @@
          (expect h (ring :get "/dav/b.bin")
                  {:headers {"Content-Type" "application/octet-stream"}})
          (expect h (ring :get "/dav/nothing.txt") {:status 404})
-         (expect h (ring :get "/dav/") {:status 405})
          (expect h (ring :put "/dav/") {:status 405})
          (expect h (ring :put "/dav/no/parent.txt" :body "x") {:status 409})
          (expect h (ring :put "/dav/a%20b.txt/c" :body "x") {:status 409})
          (fn []
            (is (= #{[] ["a b.txt"] ["b.bin"]} (set (keys (:resources @a)))))))))
+
+(deftest pages-of-collections
+  (let [h (share)]
+    (run (expect h (ring :mkcol "/dav/c%20d/") {:status 201})
+         (expect h (ring :put "/dav/c%20d/%3Cb%3E'.txt" :body "b") {:status 201})
+         (expect h (ring :put "/dav/a.txt" :body "a") {:status 201})
+         (expect h (ring :get "/dav/")
+                 #(let [page (text (:body %))]
+                    (is (= 200 (:status %)))
+                    (is (= "text/html; charset=utf-8" (get-in % [:headers "Content-Type"])))
+                    (is (str/includes? page "<title>/dav/</title>"))
+                    (is (str/includes? page (str "<li><a href=\"/dav/a.txt\">a.txt</a></li>\n"
+                                                 "<li><a href=\"/dav/c%20d/\">c d/</a></li>")))
+                    (is (not (str/includes? page "../")) "the root has no parent")))
+         (expect h (ring :get "/dav/c%20d")
+                 {:body #"<title>/dav/c d/</title>[\s\S]*<a href=\"/dav/\">../</a>"})
+         (expect h (ring :get "/dav/c%20d/")
+                 {:body #"<a href=\"/dav/c%20d/%3Cb%3E&#39;.txt\">&lt;b&gt;&#39;.txt</a>"})
+         (expect h (ring :head "/dav/")
+                 {:status 200 :headers {"Content-Type" "text/html; charset=utf-8"} :body ""})
+         (expect h (ring :get "/dav/" :headers {"If-None-Match" "*"}) {:status 304})
+         (expect h (ring :get "/dav/" :headers {"If-Match" "*"}) {:status 200})
+         (expect h (ring :options "/dav/c%20d/")
+                 {:headers {"Allow" "OPTIONS, GET, HEAD, DELETE, PROPFIND, PROPPATCH, COPY, MOVE"}}))))
 
 (deftest bytes-and-limits
   (let [h (share (atom {}) {:max-bytes 8})]
@@ -264,6 +287,7 @@
     (run (expect h (ring :put "/dav/a.txt" :body "a") {:status 201})
          (expect h (ring :propfind "/dav/" :headers {"Depth" "0"}) {:status 207})
          (expect h (ring :propfind "/dav/" :headers {"Depth" "1"}) {:status 403})
+         (expect h (ring :get "/dav/") {:status 405 :headers {"Allow" "OPTIONS, DELETE, PROPFIND, PROPPATCH, COPY, MOVE"}})
          (expect h (ring :propfind "/dav/a.txt" :headers {"Depth" "1"}) {:status 207})
          (expect h (ring :mkcol "/dav/c/") {:status 201})
          (expect h (ring :copy "/dav/c/" :headers {"Destination" "/dav/d/"}) {:status 403})
@@ -273,7 +297,7 @@
   (let [h (server/handler (dissoc (memory/backend) :put! :delete! :mkcol! :move!) {:root "/dav/"})]
     (run (expect h (ring :put "/dav/a.txt" :body "x") {:status 405})
          (expect h (ring :mkcol "/dav/c") {:status 405 :headers {"Allow" "OPTIONS, PROPFIND, PROPPATCH"}})
-         (expect h (ring :options "/dav/") {:headers {"Allow" "OPTIONS, PROPFIND, PROPPATCH"}})
+         (expect h (ring :options "/dav/") {:headers {"Allow" "OPTIONS, GET, HEAD, PROPFIND, PROPPATCH"}})
          (expect h (ring :lock "/dav/") {:status 405}))))
 
 (deftest making-collections

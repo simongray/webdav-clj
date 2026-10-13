@@ -238,6 +238,11 @@ can serve WebDAV with the same code.
 **The handler answers at once.** Nothing runs in the background, and
 nothing needs starting or stopping.
 
+**A GET of a collection answers a plain page of links** to its members,
+since RFC 4918 leaves that GET to the server and a browser is what
+usually sends it. The page has no ETag, because a backend's ETag of a
+collection needn't change when its members do.
+
 ### The files backend
 
 `files/backend` serves a directory on the JVM, so a share takes a few
@@ -594,8 +599,6 @@ Nice-to-haves
 
 - **Streaming in ClojureScript,** where the adapter must read the body
   of a PUT first. Node's streams would need a body of their own.
-- **A plain HTML index** for GET on a collection, which answers 405
-  today.
 - **Accepting Windows' Win32 properties** in a backend without dead
   properties, so that Explorer copies without an error.
 - **An answer to OPTIONS and PROPFIND at `/`** for Windows, when the
