@@ -661,6 +661,15 @@
                                                  :headers {}
                                                  :body    ""}))))))))))
 
+;; e.g. café in its two Unicode forms, which name one file on macOS, so
+;; that a MOVE from one to the other can't delete it as the destination
+(defn- nfc
+  "The `path` with each segment in Unicode's normalization form C."
+  [path]
+  (mapv #?(:clj  #(java.text.Normalizer/normalize ^String % java.text.Normalizer$Form/NFC)
+           :cljs #(.normalize % "NFC"))
+        path))
+
 (defn- transfer-to
   "The answer to a COPY, or a MOVE when `move?`, of the resource of `ctx`
   to the path `to` at `depth`, with the `overwrite` header, once the
@@ -675,7 +684,7 @@
 
        ;; RFC 4918, section 9.8.3: a collection copied into itself would
        ;; never end
-       (paths/within? path to)
+       (paths/within? (nfc path) (nfc to))
        (ring/text 403 "The destination is inside the source")
 
        :else
@@ -707,7 +716,7 @@
 
       ;; RFC 4918, sections 9.8.5 and 9.9.4: the same resource, or one that
       ;; holds the source
-      (paths/within? to path)
+      (paths/within? (nfc to) (nfc path))
       (ring/text 403 "The destination is the source or holds it")
 
       (and (= :infinity depth)

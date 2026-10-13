@@ -7,28 +7,35 @@
   listing shows:
 
   - props, the dead properties of each resource as an XML file, in a tree
-    that mirrors the share, e.g. props/notes/a.txt.xml for notes/a.txt,
+    that mirrors the share, e.g. props/notes.d/a.txt.xml for notes/a.txt,
     and root-props.xml beside it for the root's
   - tmp, the bodies of PUTs while they're written
 
   A PUT is written to a file in tmp and then moved into place, so a body
   that's refused or broken off changes nothing. A MOVE renames the file or
   the directory, properties and all, and a COPY goes through the handler's
-  own copying.
+  own copying. A new name can be 251 bytes long, so that its properties'
+  file fits beside it.
 
   An ETag is the size, the time of the last change and the inode of a
   file, where the file system has inodes. Each PUT makes a new file, so
-  its ETag differs from the last one even within one tick of the clock. A
-  symbolic link that leads out of the directory counts as nothing there,
-  and so does the backend's own directory by any other name, e.g. .WEBDAV
-  on a file system that ignores case."
+  its ETag differs from the last one even within one tick of the clock.
+
+  Some paths count as nothing there:
+
+  - a symbolic link that leads out of the directory
+  - the backend's own directory by any name
+  - a name that the file system takes for another, e.g. A.txt for a.txt
+    on one that ignores case, as macOS's does, so a MOVE can't rename a
+    file by its case alone"
   (:require [clojure.java.io :as io]
             [dk.simongray.webdav.xml :as xml])
   (:import [java.io InputStream IOException]
            [java.net URLConnection]
+           [java.text Normalizer Normalizer$Form]
            [java.nio.file AtomicMoveNotSupportedException CopyOption Files
-            FileVisitOption LinkOption NoSuchFileException OpenOption Path
-            StandardCopyOption]
+            FileSystemException FileVisitOption InvalidPathException LinkOption
+            OpenOption Path StandardCopyOption]
            [java.nio.file.attribute BasicFileAttributes FileAttribute]
            [java.util Date UUID]
            [java.util.concurrent TimeUnit]))
@@ -62,21 +69,38 @@
   "Whether the real file `f` below the directory `root` is in the backend's
   own directory, compared by file rather than by name."
   [^Path root ^Path f]
-  (let [top (.resolve root (.getName (.relativize root f) 0))]
+  (let [top (.resolve root (.getName (.relativize root f) 0))
+        own (.resolve root ^String own-dir)]
     (and (Files/exists top (make-array LinkOption 0))
-         (Files/isSameFile top (.resolve root ^String own-dir)))))
+         (Files/exists own (make-array LinkOption 0))
+         (Files/isSameFile top own))))
+
+;; e.g. A.txt for a.txt, on a file system that ignores case: the handler
+;; takes them for two resources, so a MOVE from one to the other would
+;; delete the file as the destination that it overwrites. The two Unicode
+;; forms of a name are the same name, which Java on macOS gives in NFC.
+(defn- alias?
+  "Whether the file `f` below the directory `root`, or its directory when
+  it isn't there, has another name on disk."
+  [^Path root ^Path f]
+  (let [no-links (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])
+        existing (if (Files/exists f no-links) f (.getParent f))
+        nfc      #(Normalizer/normalize (str (.relativize root ^Path %)) Normalizer$Form/NFC)]
+    (not= (nfc existing) (nfc (.toRealPath existing no-links)))))
 
 (defn- file-of
   "The file of the share's `path` below the directory `root`, or nil when
-  it's in the backend's own directory or leads out of `root`."
+  it's in the backend's own directory, leads out of `root`, has another
+  name on disk, or can't be there, e.g. below a document."
   ^Path [^Path root path]
   (when-not (= own-dir (first path))
-    (let [f (resolved root path)]
-      (when (try
-              (let [r (real f)]
-                (and r (.startsWith r root) (not (own? root r))))
-              (catch NoSuchFileException _ false))
-        f))))
+    (try
+      (let [f (resolved root path)
+            r (real f)]
+        (when (and r (.startsWith r root) (not (own? root r)) (not (alias? root f)))
+          f))
+      (catch FileSystemException _ nil)
+      (catch InvalidPathException _ nil))))
 
 (defn- writable
   "The file of the share's `path` below `root`, or else a refusal of 403."
@@ -84,12 +108,23 @@
   (or (file-of root path)
       (refuse 403 "That path is out of reach")))
 
+;; the properties of a resource are in a file of its name and .xml
+(defn- creatable
+  "The file of the share's `path` below `root` for a new resource, or else
+  a refusal: of 400 when its name is too long to keep its properties
+  beside it, or as for writable."
+  ^Path [root path]
+  (when (< (- 255 (count ".xml")) (count (.getBytes ^String (peek (vec path)) "UTF-8")))
+    (refuse 400 "The name is too long"))
+  (writable root path))
+
 (defn- attributes
-  "The basic attributes of the file `f`, or nil when it isn't there."
+  "The basic attributes of the file `f`, or nil when it isn't there or
+  can't be, e.g. below a document."
   ^BasicFileAttributes [^Path f]
   (try
     (Files/readAttributes f BasicFileAttributes ^"[Ljava.nio.file.LinkOption;" (make-array LinkOption 0))
-    (catch NoSuchFileException _ nil)))
+    (catch FileSystemException _ nil)))
 
 (defn- resource
   "The resource map of the file `f`, with its content type by the function
@@ -111,6 +146,14 @@
           (content-type (str (.getFileName f)))
           (assoc :content-type (content-type (str (.getFileName f)))))))))
 
+;; a collection's directory ends in .d and a file of properties in .xml,
+;; so that the properties of a and of the members of a.xml stay apart
+(defn- props-dir
+  "The directory of the dead properties of the members of the collection
+  at the share's `path` below `root`."
+  ^Path [^Path root path]
+  (resolved root (into [own-dir "props"] (map #(str % ".d")) path)))
+
 (defn- props-file
   "The file of the dead properties of the share's `path` below `root`.
   That of the root is beside the tree of the others, so that no name of
@@ -118,13 +161,7 @@
   ^Path [^Path root path]
   (if (empty? path)
     (resolved root [own-dir "root-props.xml"])
-    (resolved root (into [own-dir "props"] (conj (pop (vec path)) (str (peek path) ".xml"))))))
-
-(defn- props-dir
-  "The directory of the dead properties of the members of the collection
-  at the share's `path` below `root`."
-  ^Path [^Path root path]
-  (resolved root (into [own-dir "props"] path)))
+    (.resolve (props-dir root (pop (vec path))) (str (peek path) ".xml"))))
 
 (defn- delete-tree!
   "Delete the file or directory `f` and everything in it, if it's there,
@@ -171,6 +208,24 @@
         (Files/deleteIfExists tmp)
         (throw e)))))
 
+(defn- install!
+  "Move the temporary file `tmp` to `f`, or delete it when that fails."
+  [^Path tmp ^Path f]
+  (try
+    (move! tmp f)
+    (catch Throwable e
+      (Files/deleteIfExists tmp)
+      (throw e))))
+
+;; a file deleted by another program leaves its properties behind, which a
+;; new resource of the same name mustn't inherit
+(defn- delete-props!
+  "Delete the dead properties of the share's `path` below `root` and those
+  of its members."
+  [root path]
+  (Files/deleteIfExists (props-file root path))
+  (delete-tree! (props-dir root path)))
+
 (defn- read-props
   "The elements of the dead properties in the file `f`, by `namespaces`."
   [^Path f namespaces]
@@ -185,7 +240,7 @@
     (Files/deleteIfExists f)
     (let [tmp (write-temp! root (.getBytes ^String (xml/emit (into [:dav/props {}] elements) namespaces)
                                            "UTF-8"))]
-      (move! tmp f))))
+      (install! tmp f))))
 
 (defn- patched
   "The dead properties `elements` after the PROPPATCH operations `ops`."
@@ -236,29 +291,36 @@
       :content      (fn [path]
                       (Files/newInputStream (writable root path) (make-array OpenOption 0)))
       :put!         (fn [path body {:keys [if-etag] :as opts}]
-                      (let [f   (writable root path)
+                      (let [f   (creatable root path)
                             tmp (write-temp! root body)]
                         (locking lock
-                          (when (and (contains? opts :if-etag)
-                                     (not= if-etag (:etag (resource f content-type))))
-                            (Files/deleteIfExists tmp)
-                            (refuse 412 "The document changed"))
-                          (move! tmp f))
+                          (let [current (resource f content-type)]
+                            (when (and (contains? opts :if-etag) (not= if-etag (:etag current)))
+                              (Files/deleteIfExists tmp)
+                              (refuse 412 "The document changed"))
+                            (when-not current
+                              (delete-props! root path))
+                            (install! tmp f)))
                         (resource f content-type)))
       :mkcol!       (fn [path]
-                      (Files/createDirectory (writable root path) (make-array FileAttribute 0))
+                      (let [f (creatable root path)]
+                        (locking lock
+                          (Files/createDirectory f (make-array FileAttribute 0))
+                          (delete-props! root path)))
                       nil)
       :delete!      (fn [path]
                       (locking lock
                         (delete-tree! (writable root path))
-                        (Files/deleteIfExists (props-file root path))
-                        (delete-tree! (props-dir root path)))
+                        (delete-props! root path))
                       nil)
       :move!        (fn [from to]
-                      (locking lock
-                        (move! (writable root from) (writable root to))
-                        (move! (props-file root from) (props-file root to))
-                        (move! (props-dir root from) (props-dir root to)))
+                      (let [source      (writable root from)
+                            destination (creatable root to)]
+                        (locking lock
+                          (delete-props! root to)
+                          (move! source destination)
+                          (move! (props-file root from) (props-file root to))
+                          (move! (props-dir root from) (props-dir root to))))
                       nil)
       :props        (fn [path]
                       (read-props (props-file root path) namespaces))

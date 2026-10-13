@@ -265,9 +265,13 @@ lines, and litmus tests a real file system as well as memory.
   since hashing every file for a PROPFIND would read the whole share.
   Each PUT makes a new file, so its ETag differs from the last one even
   within one tick of a coarse clock.
-- **The backend finds its own directory by file, not by name,** since a
-  file system that ignores case, as macOS's does, also finds it as
-  `.WEBDAV`.
+- **A name that the file system takes for another counts as nothing,**
+  e.g. `A.txt` for `a.txt` on macOS, or `.WEBDAV` for its own directory.
+  The handler would take them for two resources, so a MOVE from one to
+  the other would delete the file as the destination it overwrites. The
+  price is that a file can't be renamed by its case alone. The two
+  Unicode forms of a name are the same name, though, since Finder sends
+  one and Java gives the other.
 - **A MOVE renames, and a COPY goes through the handler,** which copies
   the dead properties too.
 - **A symbolic link that leads out of the directory counts as nothing,**

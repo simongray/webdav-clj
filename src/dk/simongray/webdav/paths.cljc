@@ -29,36 +29,34 @@
   (not (or (#{"." ".."} s)
            (re-find #"[/\\\x00-\x1f\x7f�]" s))))
 
+(defn- decoded
+  "The decoded segments of the percent-encoded path `s`, without the empty
+  ones."
+  [s]
+  (into [] (comp (remove empty?) (map percent/decode)) (str/split (str s) #"/")))
+
 (defn segments
   "The decoded segments of the percent-encoded path `s`, without the empty
   ones, or :invalid when a segment can't name a resource."
   [s]
-  (let [decoded (into [] (comp (remove empty?) (map percent/decode))
-                      (str/split s #"/"))]
-    (if (every? segment? decoded)
-      decoded
-      :invalid)))
-
-(defn- relative
-  "The part of the percent-encoded path `s` below the `root` of a share, or
-  nil when `s` isn't the root or below it. The root without its trailing
-  slash counts as the root."
-  [root s]
-  (cond
-    (str/starts-with? s root)    (subs s (count root))
-    (= s (subs root 0 (dec (count root)))) ""
-    :else                        nil))
+  (let [d (decoded s)]
+    (if (every? segment? d) d :invalid)))
 
 (defn parse
   "The path of the percent-encoded absolute path `s`, e.g. the :uri of a
   Ring request, below the `root` of a share. It's nil when `s` isn't below
   the root, and :invalid when a segment can't name a resource (see
-  segment?).
+  segment?). The root matches by its decoded segments, so that e.g.
+  /simon%40example.com/ is below the root /simon@example.com/ too.
 
       (parse \"/dav/\" \"/dav/notes/a%20b.edn\")
       ;; => [\"notes\" \"a b.edn\"]"
   [root s]
-  (some->> (relative root (str s)) segments))
+  (let [root (decoded root)
+        d    (decoded s)]
+    (when (= root (take (count root) d))
+      (let [path (subvec d (count root))]
+        (if (every? segment? path) path :invalid)))))
 
 ;; RFC 4918, section 10.3: the Destination header and the Resource-Tag of
 ;; the If header are absolute URIs or absolute paths

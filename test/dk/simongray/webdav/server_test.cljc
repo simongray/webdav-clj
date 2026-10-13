@@ -84,6 +84,14 @@
          (expect h (ring :options "/b/") {:status 404})
          (expect h (ring :propfind "/a%20b/dav/" :headers {"Depth" "0"}) {:status 207}))))
 
+(deftest above-a-root-that-encodes-differently
+  (let [h (server/handler (memory/backend) {:root "/files/simon@example.com/"})]
+    (run (expect h (ring :propfind "/files" :headers {"Depth" "1"})
+                 #(is (= #{"/files/" "/files/simon%40example.com/"} (set (keys (multistatus %))))))
+         (expect h (ring :propfind "/files/simon%40example.com/" :headers {"Depth" "0"})
+                 #(is (= #{"/files/simon@example.com/"} (set (keys (multistatus %))))
+                      "the href below the root is as the root is written")))))
+
 (deftest putting-and-getting
   (let [a (atom {})
         h (share a)]

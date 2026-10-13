@@ -19,6 +19,8 @@
   (is (= ["100%.edn"] (paths/parse "/dav/" "/dav/100%.edn"))
       "a % that starts no escape is part of the name")
   (is (nil? (paths/parse "/dav/" "/davx/a")))
+  (is (= ["a"] (paths/parse "/s@x/" "/s%40x/a")) "the root matches however it's encoded")
+  (is (= ["a"] (paths/parse "/caf%c3%a9/" "/caf%C3%A9/a")))
   (is (= ["a"] (paths/parse "/" "/a")))
   (is (nil? (paths/parse "/dav/" "/elsewhere")))
   (testing "a segment that can't name a resource"

@@ -3,15 +3,17 @@
   handler's copies and moves over a directory, and what it keeps out of
   reach."
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [dk.simongray.webdav.client-server-test :refer [scenario]]
             [dk.simongray.webdav.files :as files]
             [dk.simongray.webdav.server :as server]
             [dk.simongray.webdav.server-test :refer [copying-and-moving]]
-            [dk.simongray.webdav.test-support :refer [expect ring run text through]])
+            [dk.simongray.webdav.test-support :refer [expect ring run text through]]
+            [dk.simongray.webdav.xml :as xml])
   (:import [java.io ByteArrayInputStream]
            [java.nio.file Files Path]
-           [java.nio.file.attribute FileAttribute]))
+           [java.nio.file.attribute FileAttribute PosixFilePermissions]))
 
 (defn- temp-dir
   "A new, empty directory."
@@ -52,11 +54,83 @@
          (expect h (ring :get "/dav/.webdav/tmp") {:status 404})
          (expect h (ring :propfind "/dav/.WEBDAV/" :headers {"Depth" "0"}) {:status 404})
          (expect h (ring :put "/dav/.WEBDAV/props/a.txt.xml" :body (stream "<x/>")) {:status 409})
+         (expect h (ring :get "/dav/a.txt/x") {:status 404})
+         (expect h (ring :put "/dav/a.txt/x" :body (stream "x")) {:status 409})
+         (expect h (ring :mkcol "/dav/a.txt/x/") {:status 409})
          (expect h (ring :put "/dav/a.txt" :body (stream "12345")) {:status 413})
          (expect h (ring :get "/dav/a.txt") {:status 200})
          (fn []
            (is (= "1234" (slurp (io/file (.toFile dir) "a.txt"))) "a body past the limit changes nothing")
            (is (empty? (.list (io/file (.toFile dir) ".webdav" "tmp"))) "and leaves no file behind")))))
+
+(defn- displayname
+  "A PROPPATCH of the request `uri` that sets its DAV:displayname to `s`."
+  [uri s]
+  (ring :proppatch uri :body (xml/emit (xml/propertyupdate [[:set :dav/displayname s]]))))
+
+(defn- displayname?
+  "A step that checks that the DAV:displayname of `uri` over the handler
+  `h` is `s`, or that it has none when `s` is nil."
+  [h uri s]
+  (expect h (ring :propfind uri :headers {"Depth" "0"}
+                  :body (xml/emit (xml/propfind {:props [:dav/displayname]})))
+          #(if s
+             (is (str/includes? (text (:body %)) (str ">" s "<")) uri)
+             (is (str/includes? (text (:body %)) "404 Not Found") uri))))
+
+(deftest names-that-alias
+  (let [h (share (temp-dir))]
+    (run (expect h (ring :put "/dav/a.txt" :body (stream "a")) {:status 201})
+         (expect h (ring :move "/dav/a.txt" :headers {"Destination" "/dav/A.txt"})
+                 #(is (#{201 403} (:status %)) "a rename where case counts, else a refusal"))
+         (fn []
+           (is (= ["a"] (for [uri   ["/dav/a.txt" "/dav/A.txt"]
+                              :let  [response (h (ring :get uri))]
+                              :when (= 200 (:status response))]
+                          (text (:body response))))
+               "either way the file is there once"))
+         (expect h (ring :put "/dav/caf%C3%A9.txt" :body (stream "c")) {:status 201})
+         (expect h (ring :move "/dav/caf%C3%A9.txt" :headers {"Destination" "/dav/cafe%CC%81.txt"})
+                 {:status 403})
+         (expect h (ring :get "/dav/caf%C3%A9.txt") {:status 200 :body "c"}))))
+
+(deftest properties-stay-apart
+  (let [dir (temp-dir)
+        h   (share dir)]
+    (run (expect h (ring :put "/dav/a" :body (stream "a")) {:status 201})
+         (expect h (displayname "/dav/a" "of-a") {:status 207})
+         (expect h (ring :mkcol "/dav/a.xml/") {:status 201})
+         (expect h (ring :put "/dav/a.xml/m" :body (stream "m")) {:status 201})
+         (expect h (displayname "/dav/a.xml/m" "of-m") {:status 207})
+         (displayname? h "/dav/a" "of-a")
+         (expect h (ring :propfind "/dav/" :headers {"Depth" "1"}) {:status 207})
+         (expect h (ring :delete "/dav/a.xml/") {:status 204})
+         (displayname? h "/dav/a" "of-a")
+         (fn [] (Files/delete (.resolve dir "a")))
+         (expect h (ring :put "/dav/a" :body (stream "a")) {:status 201})
+         (displayname? h "/dav/a" nil)
+         (fn []
+           (is (empty? (.list (io/file (.toFile dir) ".webdav" "tmp"))))))))
+
+(deftest long-names
+  (let [h    (share (temp-dir))
+        name (apply str (repeat 251 "a"))]
+    (run (expect h (ring :put (str "/dav/" name "b") :body (stream "a")) {:status 400})
+         (expect h (ring :mkcol (str "/dav/" name "b/")) {:status 400})
+         (expect h (ring :put (str "/dav/" name) :body (stream "a")) {:status 201})
+         (expect h (displayname (str "/dav/" name) "long") {:status 207})
+         (displayname? h (str "/dav/" name) "long"))))
+
+(deftest a-read-only-directory
+  (let [dir (temp-dir)]
+    (Files/writeString (.resolve dir "a.txt") "a" (make-array java.nio.file.OpenOption 0))
+    (Files/setPosixFilePermissions dir (PosixFilePermissions/fromString "r-xr-xr-x"))
+    (try
+      (let [h (share dir)]
+        (run (expect h (ring :get "/dav/a.txt") {:status 200 :body "a"})
+             (expect h (ring :propfind "/dav/" :headers {"Depth" "1"}) {:status 207})))
+      (finally
+        (Files/setPosixFilePermissions dir (PosixFilePermissions/fromString "rwxr-xr-x"))))))
 
 (deftest etags-of-quick-writes
   (let [put! (:put! (files/backend (.toFile (temp-dir))))]
