@@ -435,10 +435,8 @@ webdav-clj:
 
 **wary-fetch** 0.9.0 refuses a header value that HTTP doesn't allow,
 e.g. a token that ends in a newline, before the JDK can show the value
-in an exception.
-
-**wary-fetch** has a reader of HTTP dates in `wary-fetch.date`, which is
-marked `^:no-doc`. webdav-clj uses it anyway and writes the dates itself.
+in an exception. It has a reader of HTTP dates in `wary-fetch.date`,
+which is marked `^:no-doc`. webdav-clj uses it anyway and writes the dates itself.
 Making it public, with a writer, would make that a supported dependency.
 
 **whatwg-url** needs no change.
