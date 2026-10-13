@@ -29,6 +29,11 @@
            :extra-deps  {ring/ring-jetty-adapter {:mvn/version "1.15.3"}}
            :main-opts   ["-m" "dk.simongray.webdav.litmus"]}
 
+  ;; clojure -M:record  (the answers of Nextcloud and mod_dav in
+  ;; test/resources/webdav, from the servers that dev/record.sh starts)
+  :record {:extra-paths ["dev"]
+           :main-opts   ["-m" "dk.simongray.webdav.record"]}
+
   ;; clojure -M:test:litmus:nrepl
   :nrepl {:extra-deps {nrepl/nrepl {:mvn/version "1.7.0"}}
           ;; lets nrepl interrupt runaway evaluations

@@ -1,6 +1,10 @@
 (ns dk.simongray.webdav-test
-  "The client: its request maps, and its readings of recorded answers in
-  the shapes that Nextcloud, Apache's mod_dav and others write."
+  "The client: its request maps, and its readings of the answers of
+  Nextcloud and Apache's mod_dav, which dev/record.sh records. The tests
+  check what stays the same from one recording to the next, e.g. names
+  and sizes rather than ETags. A listing in the default namespace with
+  absolute hrefs is written by hand, for the forms that neither server
+  writes."
   (:require #?(:cljs [dk.simongray.webdav.test-setup])
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -70,38 +74,54 @@
     :headers (merge {"content-type" "application/xml; charset=utf-8"} headers)
     :body    body}))
 
+(defn- by-name
+  "The `resources` by their names."
+  [resources]
+  (into {} (map (juxt :name identity)) resources))
+
 (deftest a-listing-of-nextcloud
   (let [{:keys [status resources]} (webdav/parse-response (webdav/request :propfind root {:depth 1 :namespaces owncloud})
                                                           (response 207 (fixture "webdav/nextcloud-propfind.xml")))
-        [self doc laptop archive]  resources]
+        {:strs [notes Archive]
+         :as   found}              (by-name resources)
+        phone                      (found "phone.edn")
+        laptop                     (found "laptop at home.edn")]
     (is (= 207 status))
-    (is (= [true false false true] (map :collection? resources)))
-    (is (= ["notes" "8f1c9e2a-7a4b-4c1d-9e2f-0a1b2c3d4e5f.edn" "laptop at home.edn" "Archive"]
-           (map :name resources)))
+    (is (= #{"notes" "phone.edn" "laptop at home.edn" "Archive"} (set (keys found))))
+    (is (= [true true false false] (map :collection? [notes Archive phone laptop])))
     (is (= "https://cloud.example.org/remote.php/dav/files/simon/notes/laptop%20at%20home.edn" (:url laptop)))
-    (is (= "\"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6\"" (:etag doc)))
-    (is (= 2048 (:content-length doc)))
-    (is (= #inst "2026-10-12T21:03:09Z" (:last-modified laptop)))
-    (is (= "00000124ocabcdef1234" (get-in doc [:props :oc/fileid])) "by the alias")
-    (is (= {:dav/getcontentlength 404 :dav/getcontenttype 404} (:failed self)))
-    (is (= "-3" (get-in archive [:props :dav/quota-available-bytes])))
-    (is (= [{:name "8f1c9e2a-7a4b-4c1d-9e2f-0a1b2c3d4e5f.edn" :version "\"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6\""}
-            {:name "laptop at home.edn" :version "\"0f9e8d7c6b5a4938271605f4e3d2c1b0\""}]
+    (is (re-matches #"\"[0-9a-f]+\"" (:etag phone)))
+    (is (re-matches #"\"[0-9a-f]+\"" (:etag notes)) "a collection has an ETag too")
+    (is (= [6 7] (map :content-length [phone laptop])))
+    (is (= "application/octet-stream" (:content-type phone))
+        "by the name, whatever the Content-Type of the PUT")
+    (is (inst? (:last-modified laptop)))
+    (is (re-matches #"\d+" (get-in phone [:props :oc/fileid])) "by the alias")
+    (is (= {:dav/getcontentlength 404 :dav/getcontenttype 404} (:failed notes)))
+    (is (= {:dav/quota-used-bytes 404 :dav/quota-available-bytes 404} (:failed phone)))
+    (is (= "-3" (get-in Archive [:props :dav/quota-available-bytes])))
+    (is (= #{{:name "phone.edn" :version (:etag phone)}
+             {:name "laptop at home.edn" :version (:etag laptop)}}
            (->> resources
                 (remove :collection?)
-                (mapv (fn [{:keys [name etag]}] {:name name :version etag}))))
+                (map (fn [{:keys [name etag]}] {:name name :version etag}))
+                set))
         "the listing that like-minded would make of it")))
 
 (deftest a-listing-of-mod-dav
-  (let [{:keys [resources]} (webdav/parse-response (webdav/request :propfind "http://localhost/dav/" {:depth 1})
-                                                   (response 207 (fixture "webdav/apache-propfind.xml")))
-        [dir file]          resources]
-    (is (:collection? dir) "lp1 is DAV: too")
-    (is (= "httpd/unix-directory" (:content-type dir)))
-    (is (= #inst "2026-10-01T10:00:00Z" (:created dir)))
-    (is (= "report one.txt" (:name file)))
-    (is (= 1234 (:content-length file)))
-    (is (= "\"4d2-63f0b2c3d4e5f\"" (:etag file)))
+  (let [{:keys [resources]}       (webdav/parse-response (webdav/request :propfind "http://localhost/dav/notes/" {:depth 1})
+                                                         (response 207 (fixture "webdav/apache-propfind.xml")))
+        {:strs [notes sub]
+         :as   found}             (by-name resources)
+        file                      (found "report one.txt")]
+    (is (= #{"notes" "report one.txt" "sub"} (set (keys found))))
+    (is (and (:collection? notes) (:collection? sub)) "its prefix lp1 is DAV: too")
+    (is (= "httpd/unix-directory" (:content-type notes)))
+    (is (inst? (:created notes)))
+    (is (not (:collection? file)))
+    (is (= 12 (:content-length file)))
+    (is (= "text/plain" (:content-type file)))
+    (is (re-matches #"(W/)?\"[0-9a-f-]+\"" (:etag file)) "weak for a second after the PUT")
     (is (= "F" (get-in file [:props (keyword "http://apache.org/dav/props/" "executable")])))
     (is (= [:dav/lockentry :dav/lockentry] (map first (get-in file [:props :dav/supportedlock]))))
     (is (nil? (get-in file [:props :dav/lockdiscovery])))))
@@ -121,15 +141,25 @@
 
 (deftest other-answers
   (testing "PROPPATCH"
-    (is (= {:dav/getetag 403 :oc/favorite 424}
-           (:failed (first (:resources (webdav/parse-response (webdav/request :proppatch root {:patch [] :namespaces owncloud})
-                                                              (response 207 (fixture "webdav/proppatch-207.xml")))))))))
+    (let [patched   #(first (:resources (webdav/parse-response (webdav/request :proppatch root {:patch [] :namespaces owncloud})
+                                                               (response 207 %))))
+          nextcloud (patched (fixture "webdav/nextcloud-proppatch.xml"))
+          apache    (patched (fixture "webdav/apache-proppatch.xml"))]
+      (is (= {:oc/favorite nil :dav/getetag nil} (:props nextcloud)) "Nextcloud takes even DAV:getetag")
+      (is (nil? (:failed nextcloud)))
+      (is (= {:dav/getetag 409 (keyword "http://example.com/ns/" "color") 424} (:failed apache))
+          "mod_dav refuses it, and so the other one")))
   (testing "a precondition that failed, with sabre/dav's body"
-    (is (= {:status 412 :error [(keyword "http://sabredav.org/ns" "sabredav-version")
-                                (keyword "http://sabredav.org/ns" "exception")
+    (is (= {:status 412 :error [(keyword "http://sabredav.org/ns" "exception")
                                 (keyword "http://sabredav.org/ns" "message")
                                 (keyword "http://sabredav.org/ns" "header")]}
-           (webdav/parse-response (webdav/request :put root) (response 412 (fixture "webdav/sabre-412.xml"))))))
+           (webdav/parse-response (webdav/request :put root) (response 412 (fixture "webdav/nextcloud-412.xml"))))))
+  (testing "depth infinity, which mod_dav refuses with a page of HTML"
+    (is (= {:status 403}
+           (webdav/parse-response (webdav/request :propfind root {:depth :infinity})
+                                  {:status  403
+                                   :headers {"content-type" "text/html; charset=iso-8859-1"}
+                                   :body    (fixture "webdav/apache-403.xml")}))))
   (testing "a DAV:error of RFC 4918"
     (is (= {:status 403 :error [:dav/propfind-finite-depth]}
            (webdav/parse-response (webdav/request :propfind root {:depth :infinity})

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:ns1="http://example.com/ns/" xmlns:ns0="DAV:">
+<D:response>
+<D:href>/dav/notes/report%20one.txt</D:href>
+<D:propstat>
+<D:prop><ns0:getetag/>
+</D:prop>
+<D:status>HTTP/1.1 409 (status)</D:status>
+<D:responsedescription>
+Property is read-only.</D:responsedescription>
+</D:propstat>
+<D:propstat>
+<D:prop><ns1:color/>
+</D:prop>
+<D:status>HTTP/1.1 424 (status)</D:status>
+<D:responsedescription>
+Attempted DAV:set operation could not be completed due to other errors.</D:responsedescription>
+</D:propstat>
+</D:response>
+</D:multistatus>

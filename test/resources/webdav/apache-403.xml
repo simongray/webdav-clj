@@ -1,0 +1,8 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<title>403 Forbidden</title>
+</head><body>
+<h1>Forbidden</h1>
+<p>PROPFIND requests with a Depth of "infinity" are not allowed for /dav/notes/.</p>
+</body></html>

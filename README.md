@@ -171,12 +171,14 @@ npm install                           # once, for the Node tests
 clojure -M:cljs compile test          # the tests in Node
 clojure -M:cljs compile browser-test  # for a browser, from target/browser-test
 dev/litmus.sh                         # litmus against the handler on Jetty
+dev/record.sh                         # the answers of Nextcloud and mod_dav, for the tests
 ```
 
 The litmus script downloads litmus 0.18, builds it into `target/litmus`
 (which needs a C compiler), and runs its suites against the handler over
-a memory backend on Jetty. The design and its reasons are in
-[doc/proposal.md](doc/proposal.md).
+a memory backend on Jetty. The record script runs Nextcloud and Apache's
+mod_dav in Docker and records their answers into `test/resources`. The
+design and its reasons are in [doc/proposal.md](doc/proposal.md).
 
 License
 -------

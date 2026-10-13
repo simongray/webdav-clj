@@ -364,6 +364,11 @@ e.g. a listing becomes this:
 like-minded keeps its own rule of throwing ::failed for a status it
 doesn't expect, since webdav-clj returns every status as data.
 
+Against mod_dav, a version read within a second of a write is a weak
+ETag, which never passes If-Match, since If-Match uses the strong
+comparison. The put then fails as a conflict, and like-minded's next
+sync reads a strong ETag, so it costs a round and nothing more.
+
 **store/webdav/server.clj** would delete its multistatus, preconditions,
 OPTIONS, PROPFIND and the methods, close to all of its 331 lines. It
 would keep a function that turns a store into a backend:
@@ -481,8 +486,8 @@ tests the handler's own copying, dead properties included.
 
 ### Local tests
 
-- **The client's requests and readers,** against answers in the shapes
-  that Nextcloud (sabre/dav) and Apache's mod_dav write, and one in the
+- **The client's requests and readers,** against the recorded answers of
+  Nextcloud and Apache's mod_dav, and a listing written by hand in the
   default namespace with absolute hrefs, in `test/resources/webdav`.
 - **The handler,** method by method over the memory backend, with the
   litmus cases that don't need a network.
@@ -501,9 +506,23 @@ litmus doesn't reach, e.g. a Destination on another host that was copied
 locally, and an overwrite that went ahead when deleting the destination
 failed. Each one is fixed and has a test.
 
-The recorded answers are written from the documented formats of each
-server, not captured from live ones, which needs accounts that only you
-can make. Capturing real ones is among the questions below.
+### Recorded answers
+
+`dev/record.sh` runs Nextcloud 34.0.4 and Apache 2.4.69 with mod_dav in
+Docker, on localhost alone, and records their answers to a listing, a
+PROPPATCH and a failing precondition. The tests check what stays the
+same from one recording to the next, e.g. names and sizes rather than
+ETags, so recording again needs no change to them. A hosted Fastmail or
+Hetzner storage box would cost money, so they wait.
+
+The real answers differed from what their documentation had led me to
+write:
+
+- Nextcloud takes a PROPPATCH of DAV:getetag with a 200, and its type of
+  a document comes from the name, whatever the Content-Type of the PUT.
+- mod_dav refuses a protected property with a 409 rather than a 403, and
+  depth infinity with a page of HTML rather than a DAV:error.
+- mod_dav's ETags are weak for a second after a write.
 
 
 Nice-to-haves
@@ -525,29 +544,29 @@ Nice-to-haves
   rclone and Cyberduck use for resumable uploads.
 
 
-Questions for Simon
--------------------
+Decisions
+---------
 
-1. **Are keywords with URI namespaces right for unknown names?** The
-   alternative is Clark strings such as `"{DAV:}getetag"` for every
-   name, which print and store well but read worse in code. I recommend
-   the keywords, with aliases for what you know.
-2. **Should class 2 come next, or sync?** Locking makes Finder and
-   Office write; sync makes CalDAV and CardDAV clients fast. I recommend
-   class 2 first if a share for people is the next use, and sync first
-   if CalDAV is.
-3. **Should CalDAV and CardDAV be libraries of their own** (as
-   recommended) or namespaces of webdav-clj?
-4. **Is 32 MB the right default for :max-bytes,** while bodies are held
-   in memory? like-minded and the podcast server use the same.
-5. **Will you make the accounts** at Nextcloud, Fastmail and a Hetzner
-   storage box for recording real answers? Only a person can.
-6. **Should the qname-hiccup changes above happen first,** so that
-   webdav-clj can drop its own prefix code before its release?
-7. **Should like-minded keep `handler`'s signature,** or take webdav-clj's
-   options directly, which would change the podcast server?
-8. **Is comparing the Destination's host right for your deployments?**
-   Behind a proxy that rewrites the Host header and sets no
-   X-Forwarded-Host, a COPY or MOVE gets a 502 until :hosts names the
-   public host. like-minded never sends COPY or MOVE, so the podcast
-   server isn't affected.
+The questions of this proposal, as Simon settled them on 13 October
+2026:
+
+1. **Property names are keywords,** with aliases for the namespaces you
+   know and the URI as the keyword namespace for the rest. Clark strings
+   are for storage alone, through `xml/clark`.
+2. **Class 2 comes next.** It lets Finder and Office write, and litmus's
+   locks suite is ready to test it. Sync waits for CalDAV, which waits
+   for ical-clj.
+3. **CalDAV and CardDAV get libraries of their own,** caldav-clj and
+   carddav-clj, on webdav-clj and ical-clj.
+4. **:max-bytes stays at 32 MB** while bodies are held in memory, and
+   grows once they stream.
+5. **The recorded answers come from containers on localhost,** Nextcloud
+   and mod_dav, which cost nothing. Fastmail and Hetzner wait.
+6. **qname-hiccup changes first,** at least writing on one line and
+   generating prefixes, so that webdav-clj's release doesn't carry its
+   own prefix code and dead properties keep their exact values.
+7. **like-minded's `handler` keeps its signature** and passes
+   :propfind-infinity? true, so the podcast server needs no change.
+8. **The Destination's host is compared,** as RFC 4918 requires, with
+   :hosts for a proxy that rewrites the Host header and sets no
+   X-Forwarded-Host.
