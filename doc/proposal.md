@@ -448,6 +448,19 @@ like-minded
 like-minded would take webdav-clj as a dependency and keep only the
 mapping between its stores and WebDAV.
 
+**This is done,** in like-minded's commit 39793a0 of 13 October 2026, as
+planned below. Its two namespaces went from 604 lines to 337. Three
+things came out differently:
+
+- A GET of the collection now gives a page of links, so the Allow header
+  of the collection names GET too.
+- The backend turns an ex-info without a :type from the store into a
+  400, as the old handler did, since the folder store refuses a name
+  such as `.hidden` that way.
+- A listing must come as XML by its Content-Type, which every server
+  that was recorded sends, and one that can't be read fails rather than
+  listing nothing.
+
 **store/webdav.cljc** would delete:
 
 - `propfind-body`, `uri->alias`, `document-name` and `entries`, which
