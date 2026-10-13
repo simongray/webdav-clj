@@ -3,28 +3,23 @@ webdav-clj
 
 [![Clojars Project](https://img.shields.io/clojars/v/dk.simongray/webdav-clj.svg)](https://clojars.org/dk.simongray/webdav-clj)
 
-This is a Clojure and ClojureScript library for
-[WebDAV](https://www.rfc-editor.org/rfc/rfc4918), the protocol that
-Nextcloud, Fastmail, storage boxes and file managers use to share files
-over HTTP. It has a client and a Ring handler for classes 1 and 2 of the
-standard: collections, properties, COPY and MOVE, and locks.
+A [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) client and server for
+Clojure and ClojureScript. Talk to Nextcloud, Fastmail or any other
+WebDAV server, or serve your own storage as a share that file managers
+can mount.
 
-- **Plain data.** Requests are maps that any HTTP client can send, and
-  answers are maps too, whatever their status. Property names are
-  keywords, e.g. `:dav/getetag`.
-- **Your own storage.** The handler serves a backend that is a map of a
-  few functions, so a share can live in a database, in memory or on disk.
-  It takes care of the rest: ETags, preconditions, the If header, Depth,
-  and copying and moving between collections.
-- **Safe by default.** Paths can't leave the share, bodies, properties
-  and locks have limits, documents run no scripts, and PROPFIND refuses
-  depth infinity unless you allow it.
+- **Plain data.** Requests and answers are maps, whatever the status, and
+  property names are keywords such as `:dav/getetag`.
+- **Your own storage.** A backend is a map of a few functions over a
+  database, a directory or an atom. The Ring handler takes care of the
+  rest: ETags, preconditions, locks, copying and moving.
+- **Safe by default.** Paths stay inside the share, every body, property
+  and lock has a limit, and uploaded documents can't run scripts.
 - **Tested against litmus.** The handler passes every test of
   [litmus](https://notroj.github.io/litmus/), the classic WebDAV test
-  suite, locks included.
-
-The same code runs on the JVM, in Node and in the browser, with the same
-results on each.
+  suite.
+- **One codebase.** The same code runs on the JVM, in Node and in the
+  browser.
 
 > This library was spun out of
 > [like-minded](https://github.com/simongray/like-minded), which syncs
@@ -34,18 +29,18 @@ results on each.
 Getting started
 ---------------
 
-It requires Clojure 1.11+ and Java 11+. For the latest release, add it
-from [Clojars](https://clojars.org/dk.simongray/webdav-clj) to the
-`:deps` in your `deps.edn`:
+It requires Clojure 1.11+ and Java 11+. Add it from
+[Clojars](https://clojars.org/dk.simongray/webdav-clj) to the `:deps` in
+your `deps.edn`:
 
 ```clojure
 dk.simongray/webdav-clj {:mvn/version "0.1.0"}
 ```
 
-For changes that aren't released yet, use the SHA of the latest commit on
-`master` instead. In shadow-cljs a Git dependency only works through
-`deps.edn`, so set `:deps true` in your `shadow-cljs.edn` too. To read XML
-in Node, set `globalThis.DOMParser` to a DOMParser, e.g. the one from
+For unreleased changes, depend on the latest commit on `master` instead.
+In shadow-cljs, a Git dependency only works through `deps.edn`, so set
+`:deps true` in your `shadow-cljs.edn` too. To read XML in Node, set
+`globalThis.DOMParser` to a DOMParser, e.g. the one from
 `@xmldom/xmldom`.
 
 The client
@@ -71,53 +66,56 @@ which uses [wary-fetch](https://github.com/simongray/wary-fetch):
 ;;                  …}]}
 ```
 
-Each resource has keys from its live properties, e.g. `:content-length`
-and `:last-modified`, and every value that came back under `:props`. A
-property in a namespace without an alias gets the namespace's URI as its
-keyword namespace. Give `:namespaces` a table of your own aliases, e.g.
+Each resource has keys for its live properties, e.g. `:etag` and
+`:last-modified`, and every value that came back is in `:props`. A
+namespace without an alias keeps its URI as the keyword namespace, so
+give `:namespaces` aliases of your own, e.g.
 `{"http://owncloud.org/ns" :oc}`.
 
 Writes take the preconditions of HTTP, so two devices can't overwrite
 each other's changes:
 
 ```clojure
-(webdav/call! (webdav/request :put "https://dav.example.org/notes/phone.edn"
-                              {:body "{:v 2}" :if-match "\"1\""}))
+(def phone "https://dav.example.org/notes/phone.edn")
+
+(webdav/call! (webdav/request :put phone {:body "{:v 2}" :if-match "\"1\""}))
 ;; => {:status 204 :etag "\"2\""}
 ;; or {:status 412} when the document changed in the meantime
 ```
 
-To keep others out for longer, lock the document, write with the lock's
-token, and remove the lock when you're done:
+To keep others out for longer, lock the document and write with the
+lock's token:
 
 ```clojure
 (def lock
-  (:lock (webdav/call! (webdav/request :lock "https://dav.example.org/notes/phone.edn"
-                                       {:scope :exclusive :owner "phone" :timeout 600}))))
+  (-> (webdav/request :lock phone {:scope   :exclusive
+                                   :owner   "phone"
+                                   :timeout 600})
+      webdav/call!
+      :lock))
 
-(webdav/call! (webdav/request :put "https://dav.example.org/notes/phone.edn"
-                              {:body "{:v 3}" :lock-token (:token lock)}))
+(webdav/call! (webdav/request :put phone {:body       "{:v 3}"
+                                          :lock-token (:token lock)}))
 ```
 
 A `:lock` with only the `:lock-token` refreshes the lock, and `:unlock`
-removes it. Every other method has options of its own too, e.g. `:patch`
-for PROPPATCH, and `:destination` and `:overwrite?` for COPY and MOVE.
-The docstring of `webdav/request` lists them. To send the map with
-another client, read its answer with `webdav/parse-response`, or give
-that client to `webdav/call!` as its `:send`. In a browser, the server
-must let the WebDAV methods and headers through CORS and expose the
-ETag.
+removes it. The docstring of `webdav/request` lists the options of every
+method, e.g. `:patch` for PROPPATCH and `:destination` for COPY and MOVE.
+To send the map with another HTTP client, give it to `webdav/call!` as
+`:send`, or read its answer with `webdav/parse-response`. In a browser,
+the server must let the WebDAV methods and headers through CORS and
+expose the ETag.
 
-A resource has a `:url` only on the origin of the request, since a
-request to it carries the same credentials. When a user gives you the
-URL of a share, give `webdav/request` the `:allow-pred` of wary-fetch's
+A resource only has a `:url` on the origin of the request, since a
+request to it carries your credentials. When the URL of a share comes
+from a user, give `webdav/request` an `:allow-pred` of wary-fetch's
 `url/public?`, so that neither the URL nor a redirect reaches your own
 network.
 
 Serving a share
 ---------------
 
-`server/handler` serves a backend over WebDAV. On the JVM the files
+Serve a backend over WebDAV with `server/handler`. On the JVM, the files
 backend serves a directory:
 
 ```clojure
@@ -129,12 +127,11 @@ backend serves a directory:
                  {:port 8080 :join? false})
 ```
 
-It keeps the dead properties and the bodies that are being written in a
-`.webdav` directory of its own, which no request reaches. It follows no
-symbolic links, and nothing else should write to the directory while it
-serves it. A browser that opens a collection gets a plain page of links
-to its members. The memory backend in `dk.simongray.webdav.memory`
-serves an atom instead, on every platform, for tests.
+It keeps dead properties and unfinished uploads in a `.webdav` directory
+that no request reaches, and it follows no symbolic links. Nothing else
+should write to the directory while it's served. For tests, the memory
+backend in `dk.simongray.webdav.memory` keeps a share in an atom
+instead.
 
 A backend of your own is a map of functions of a path, a vector of
 decoded segments below the root. Only `:resource` is required, so this
@@ -145,32 +142,35 @@ is a read-only share of a few texts:
   {"hello.txt" "Hello"
    "bye.txt"   "Bye"})
 
+(defn text-resource
+  "The resource map of the text `s`."
+  [s]
+  {:etag (hash s) :content-type "text/plain; charset=utf-8"})
+
 (def backend
   {:resource (fn [path]
                (cond
-                 (empty? path)                                {:collection? true}
-                 (and (= 1 (count path)) (texts (first path))) {:etag         (hash (texts (first path)))
-                                                                :content-type "text/plain; charset=utf-8"}))
+                 (empty? path)      {:collection? true}
+                 (= 1 (count path)) (some-> (texts (first path)) text-resource)))
    :children (fn [_]
                (for [[name text] texts]
-                 {:name name :etag (hash text)}))
+                 (assoc (text-resource text) :name name)))
    :content  (fn [[name]]
                (texts name))})
 ```
 
 Add `:put!`, `:mkcol!`, `:delete!`, `:props` and `:patch-props!` to make
-it writable, and `:copy!` and `:move!` when your storage copies and moves
-faster than the handler can by itself. The docstring of the `server`
-namespace describes each function and the keys of a resource map.
+it writable, and `:copy!` and `:move!` if your storage does those faster
+than the handler can. The docstring of the `server` namespace describes
+each function and the keys of a resource map.
 
-`:put!` gets the body of the request as a stream, so a backend can write
-a large file as it comes: an InputStream on the JVM, and a ReadableStream
-in ClojureScript. To keep the whole body in memory, read it with
-`server/body-bytes`. A document whose resource map has its
-`:content-length` also answers a GET of a range of bytes, e.g. for a
-video player that seeks.
+The body of a PUT reaches `:put!` as a stream, an InputStream on the JVM
+and a ReadableStream in ClojureScript, so a large file can be written as
+it arrives, or read into memory with `server/body-bytes`. A document
+whose resource map has a `:content-length` also answers requests for a
+range of bytes, e.g. from a video player that seeks.
 
-The handler checks every precondition before it calls a function. A
+The handler checks every precondition before it calls a function, and a
 function refuses with an ex-info, e.g. when a quota is full:
 
 ```clojure
@@ -187,18 +187,16 @@ document:
                                   :principal :user})
 ```
 
-A write to what a lock covers must then hold the lock: send its token,
-as the principal that took it. Here `:principal` gives the `:user` that
-your login put in the request. The table lives in memory, since locks
-last minutes, and an expired lock simply stops counting.
+A write to what a lock covers must then send the lock's token, as the
+principal that took it: here, the `:user` that your login put in the
+request.
 
-The options of `server/handler`, listed in `server/default-options`, set
-the limits, the share's public host name behind a proxy, the aliases of
-namespaces, live properties of your own (e.g. the principal of RFC 5397)
-and methods of your own, such as the REPORT of CalDAV. The handler checks
-no credentials, so mount it behind your login. Windows sends OPTIONS and
-PROPFIND to `/` and to each collection above the share before it maps
-it, so when the share isn't at `/`, route those to the handler too.
+The handler checks no credentials, so mount it behind your login. The
+options in `server/default-options` set the limits, the share's public
+host name behind a proxy, aliases of namespaces, and live properties and
+methods of your own, e.g. the REPORT of CalDAV. Windows sends OPTIONS and
+PROPFIND to `/` and to each collection above a share before it maps it,
+so if the share isn't at `/`, route those to the handler too.
 
 Not yet
 -------
@@ -220,12 +218,10 @@ dev/litmus.sh                         # litmus against the handler on Jetty
 dev/record.sh                         # the answers of Nextcloud and mod_dav, for the tests
 ```
 
-The litmus script downloads litmus 0.18, builds it into `target/litmus`
-(which needs a C compiler), and runs its suites against the handler on
-Jetty, over the memory backend and over a directory. The record script
-runs Nextcloud and Apache's mod_dav in Docker and records their answers
-into `test/resources`. The design and its reasons are in
-[doc/proposal.md](doc/proposal.md).
+The litmus script builds litmus 0.18 into `target/litmus`, which needs a
+C compiler, and runs it against the handler over memory and over a
+directory. The record script needs Docker. The design and its reasons
+are in [doc/proposal.md](doc/proposal.md).
 
 License
 -------
