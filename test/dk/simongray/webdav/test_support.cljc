@@ -102,13 +102,15 @@
 (defn through
   "The function that sends a client's request map to the Ring `handler`
   and gives its response as wary-fetch does, with lower-case headers and
-  the body as text, or bytes for :as :bytes."
+  the body as text, or bytes for :as :bytes. A :range becomes a Range
+  header."
   [handler]
-  (fn [{:keys [method url as] :as request}]
+  (fn [{:keys [method url as range] :as request}]
     (let [{:keys [headers body]} (http/revealed request)]
       (async/then (handler {:request-method method
                             :uri            (url/pathname url)
-                            :headers        (into {} (map (fn [[k v]] [(str/lower-case k) v])) headers)
+                            :headers        (cond-> (into {} (map (fn [[k v]] [(str/lower-case k) v])) headers)
+                                              range (assoc "range" (str "bytes=" (first range) "-" (second range))))
                             :body           body})
                   (fn [response]
                     (-> response

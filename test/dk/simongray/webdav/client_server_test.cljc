@@ -63,6 +63,9 @@
            #(is (= {:status 200 :body "{:v 2}" :content-type "application/edn"}
                    (select-keys % [:status :body :content-type]))
                 "a PUT without a Content-Type keeps the old one"))
+     (step send :get phone {:range [1 2]}
+           #(is (= {:status 206 :body ":v" :content-range {:start 1 :end 2 :total 6}}
+                   (select-keys % [:status :body :content-range]))))
      (step send :get laptop {:as :bytes}
            #(is (= [0 255] (map (fn [b] (bit-and b 0xff)) (:body %)))))
      (step send :proppatch phone {:patch [[:set :dav/displayname "Phone"]]}

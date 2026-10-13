@@ -30,6 +30,7 @@ Scope
 |---|---|
 | [RFC 4918](https://www.rfc-editor.org/rfc/rfc4918) WebDAV | class 1 for client and server: GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, OPTIONS, multistatus and the If header; and class 2, LOCK and UNLOCK, when the handler gets a lock table |
 | [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), section 13 | ETags and conditional requests, evaluated in the order of section 13.2.2 |
+| [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), section 14 | one range of bytes for GET, with If-Range |
 | [RFC 8144](https://www.rfc-editor.org/rfc/rfc8144) Prefer in WebDAV | return=minimal for PROPFIND and PROPPATCH, and depth-noroot |
 | [RFC 5397](https://www.rfc-editor.org/rfc/rfc5397) current-user-principal | a live property that the app computes, through the handler's :live-properties |
 | [RFC 4331](https://www.rfc-editor.org/rfc/rfc4331) quota | the same, e.g. so that Finder and Windows show the free space |
@@ -220,9 +221,11 @@ data in and data out: the XML goes through qname-hiccup, the paths
 through whatwg-url and the dates through a few lines of arithmetic. Only
 two things differ by platform:
 
-- On the JVM the body of a request is an InputStream, which the handler
-  reads within its limit. In ClojureScript the adapter must give bytes
-  or a string, as for websub-clj's hub.
+- On the JVM the body of a PUT is an InputStream, which the handler
+  hands `:put!` behind its limit, so a backend can write a large file as
+  it comes. An XML body it reads itself, within its own smaller limit.
+  In ClojureScript the adapter must give bytes or a string, as for
+  websub-clj's hub.
 - A backend in ClojureScript (e.g. over IndexedDB or node:fs) returns
   promises, so the handler chains every call with wary-fetch's
   `async/then`. On the JVM a backend returns plain values, and `then`
@@ -325,9 +328,10 @@ body.
 - **PROPFIND at depth infinity gets a 403** with `propfind-finite-depth`,
   as section 9.1.1 allows. A missing Depth means infinity. The option
   :propfind-infinity? turns it on.
-- **A PUT body holds at most 32 MB** (:max-bytes), since it's read into
-  memory, and a 413 says so before the body is read when the
-  Content-Length is larger.
+- **A PUT body holds at most 1 GB** (:max-bytes). A 413 says so before
+  the body is read when the Content-Length is larger, and else the
+  stream refuses with a 413 once it passes the limit, so a backend must
+  read the whole body before it replaces anything.
 - **An XML body holds at most 1 MB** (:max-xml-bytes).
 - **A PUT with a Content-Range gets a 400,** as RFC 9110, section 14.5,
   asks of a server without partial PUT, so a resumed upload can't write
@@ -416,7 +420,7 @@ would keep a function that turns a store into a backend:
 - `:mkcol!` is left out, so MKCOL answers 405 as before
 
 Its `handler` keeps its signature and calls `server/handler` with that
-backend, :root and :max-bytes. A prototype of the two, 54 lines in all,
+backend, :root and :max-bytes. A prototype of the two, 55 lines in all,
 passed the checks of like-minded's `serving-a-store` test over its memory
 store and its numbered store, apart from the two changes below that
 those checks see. A few answers change:
@@ -565,9 +569,8 @@ write:
 Nice-to-haves
 -------------
 
-- **Streaming bodies.** The handler reads a PUT into memory, so 32 MB is
-  the default limit. A backend over files would rather take the stream,
-  and GET would like Range requests (e.g. for video).
+- **Streaming in ClojureScript,** where the adapter must read the body
+  of a PUT first. Node's streams would need a body of their own.
 - **A backend over the file system** on the JVM, with dead properties in
   a file beside each resource. It would make a share in a few lines and
   be the obvious backend for litmus too.
@@ -597,7 +600,8 @@ The questions of this proposal, as Simon settled them on 13 October
 3. **CalDAV and CardDAV get libraries of their own,** caldav-clj and
    carddav-clj, on webdav-clj and ical-clj.
 4. **:max-bytes stays at 32 MB** while bodies are held in memory, and
-   grows once they stream.
+   grows once they stream. They stream on the JVM now, so it's 1 GB, and
+   GET answers Range requests too.
 5. **The recorded answers come from containers on localhost,** Nextcloud
    and mod_dav, which cost nothing. Fastmail and Hetzner wait.
 6. **qname-hiccup changes first,** at least writing on one line and

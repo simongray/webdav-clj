@@ -102,6 +102,38 @@
                  {:status 400})
          (expect h (ring :get "/dav/c.txt") {:status 404}))))
 
+(deftest ranges
+  (let [h (share)]
+    (run (expect h (ring :put "/dav/a.txt" :body "0123456789") {:status 201})
+         (expect h (ring :head "/dav/a.txt") {:headers {"Accept-Ranges" "bytes"}})
+         (expect h (ring :get "/dav/a.txt" :headers {"Range" "bytes=2-5"})
+                 {:status 206 :headers {"Content-Range" "bytes 2-5/10"} :body "2345"})
+         (expect h (ring :get "/dav/a.txt" :headers {"Range" "bytes=-3"})
+                 {:status 206 :headers {"Content-Range" "bytes 7-9/10"} :body "789"})
+         (expect h (ring :get "/dav/a.txt" :headers {"Range" "bytes=8-"}) {:status 206 :body "89"})
+         (expect h (ring :get "/dav/a.txt" :headers {"Range" "bytes=10-"})
+                 {:status 416 :headers {"Content-Range" "bytes */10"}})
+         (expect h (ring :get "/dav/a.txt" :headers {"Range" "bytes=0-1,4-5"})
+                 {:status 200 :body "0123456789"})
+         (expect h (ring :get "/dav/a.txt" :headers {"Range" "bytes=2-5" "If-Range" "\"1\""})
+                 {:status 206 :body "2345"})
+         (expect h (ring :get "/dav/a.txt" :headers {"Range" "bytes=2-5" "If-Range" "\"2\""})
+                 {:status 200 :body "0123456789"})
+         (expect h (ring :get "/dav/a.txt" :headers {"Range" "bytes=2-5"
+                                                     "If-Range" "Mon, 01 Jan 2001 00:00:00 GMT"})
+                 {:status 200}))))
+
+#?(:clj
+   (deftest streamed-bodies
+     (let [share-atom (atom {})
+           h          (share share-atom {:max-bytes 8})
+           stream     #(java.io.ByteArrayInputStream. (.getBytes ^String %))]
+       (run (expect h (ring :put "/dav/a.txt" :body (stream "12345678")) {:status 201})
+            (expect h (ring :put "/dav/a.txt" :body (stream "123456789")) {:status 413})
+            (expect h (ring :get "/dav/a.txt") {:body "12345678"})
+            (fn [] (is (= 1 (count (filter #(= ["a.txt"] %) (keys (:resources @share-atom))))))
+                   "a body past the limit changes nothing")))))
+
 (deftest conditional-requests
   (let [h (share)]
     (run (expect h (ring :put "/dav/a.txt" :body "1") {:status 201})

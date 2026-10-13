@@ -120,7 +120,9 @@
   - :copy and :move take the :destination, a URL or a path relative to
     `url`, and :overwrite? false to fail when it exists. A :copy takes
     :depth 0 for a collection alone.
-  - :get takes :as :bytes for a body of bytes.
+  - :get takes :as :bytes for a body of bytes, and a :range of the first
+    and the last byte to get (nil for the rest), as wary-fetch's send!
+    takes it.
   - :lock takes the :scope (:exclusive or :shared) and the :owner (text
     or an element) of a new lock, and its :timeout in seconds or
     :infinite. Without a :scope it refreshes the lock of its
@@ -141,7 +143,8 @@
                            opts)
                    (:lock-token opts) (update :headers merge (lock-token-headers method opts))
                    (seq namespaces)   (assoc :namespaces namespaces)
-                   as                 (assoc :as as))]
+                   as                 (assoc :as as)
+                   (:range opts)      (assoc :range (:range opts)))]
      (case method
        :propfind  (xml-body base (xml/propfind opts) namespaces)
        :proppatch (xml-body base (xml/propertyupdate (:patch opts)) namespaces)
@@ -287,13 +290,17 @@
   `response` give."
   [{:keys [headers] :as response}]
   (let [length (some->> (headers/header headers "content-length")
-                        (re-matches #"\d{1,18}"))]
+                        (re-matches #"\d{1,18}"))
+        range  (some-> (headers/header headers "content-range") headers/content-range)]
     (cond-> {}
       (headers/header headers "content-type")
       (assoc :content-type (headers/header headers "content-type"))
 
       length
       (assoc :content-length (parse-long length))
+
+      range
+      (assoc :content-range range)
 
       (some-> (headers/header headers "last-modified") dates/parse-http-date)
       (assoc :last-modified (dates/parse-http-date (headers/header headers "last-modified"))))))
@@ -334,7 +341,8 @@
   - a success of LOCK: the :lock that it took or refreshed, as resource
     gives its :locks
   - a success of GET or HEAD: the :content-type, :content-length and
-    :last-modified, and the :body of a GET
+    :last-modified, and the :body of a GET, with the :content-range of a
+    part (a map of :start, :end and :total)
   - an error with a DAV:error body: the precondition names as :error,
     e.g. [:dav/propfind-finite-depth]"
   [{:keys [method url namespaces] :as request} {:keys [status headers] :as response}]

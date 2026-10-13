@@ -26,12 +26,15 @@
   methods. Without :copy! and :move! it copies with the other functions,
   and moves by copying and deleting.
 
-  A :put! takes the bytes of the body and a map of its :content-type.
-  For a conditional request, the map also has the :if-etag, the :etag of
-  the resource map that the handler checked (nil when nothing was
-  there), so that a backend that can write conditionally refuses a
-  document that changed since. A :patch-props! takes the operations in
-  order: [:set element] and [:remove name].
+  A :put! takes the body and a map of its :content-type. On the JVM the
+  body is an InputStream, which throws a refusal of 413 once more than
+  :max-bytes are read from it, so a backend can write it to a file as it
+  comes, but should read it all before it replaces anything. In
+  ClojureScript it's bytes. For a conditional request, the map also has
+  the :if-etag, the :etag of the resource map that the handler checked
+  (nil when nothing was there), so that a backend that can write
+  conditionally refuses a document that changed since. A :patch-props!
+  takes the operations in order: [:set element] and [:remove name].
 
   The functions that write return nil. When :delete!, :copy! or :move!
   can't change some members, they can return a map of those paths to a
@@ -79,8 +82,7 @@
     Host and X-Forwarded-Host headers, e.g. its public name behind a
     proxy that rewrites both; a COPY or a MOVE to any other host gets a
     502
-  - :max-bytes, the most that the body of a PUT can hold, 32 MB, since
-    it's held in memory
+  - :max-bytes, the most that the body of a PUT can hold, 1 GB
   - :max-xml-bytes, the most that the XML body of a PROPFIND or a
     PROPPATCH can hold, 1 MB
   - :propfind-infinity?, whether PROPFIND answers at depth infinity on a
@@ -104,7 +106,7 @@
   - :clock, a function of no arguments that returns the instant now"
   {:root               "/"
    :hosts              []
-   :max-bytes          (* 32 1024 1024)
+   :max-bytes          (* 1024 1024 1024)
    :max-xml-bytes      (* 1024 1024)
    :propfind-infinity? false
    :namespaces         {}
@@ -429,17 +431,61 @@
              "MS-Author-Via" "DAV"}
    :body    ""})
 
+;; RFC 9110, section 14.3: a document of known length answers ranges
 (defn- representation
   "The headers of a GET of the document `resource`."
-  [{:keys [content-type content-language] :as resource}]
+  [{:keys [content-type content-language content-length] :as resource}]
   (cond-> (assoc (validators resource)
                  "Content-Type" (or content-type "application/octet-stream"))
-    content-language (assoc "Content-Language" content-language)))
+    content-language (assoc "Content-Language" content-language)
+    content-length   (assoc "Accept-Ranges" "bytes")))
+
+;; RFC 9110, section 13.1.5
+(defn- if-range-holds?
+  "Whether the If-Range of the request of `ctx` holds for the `resource`,
+  or it has none, so that its Range counts. It holds for the same strong
+  ETag, or for the same time of the last change."
+  [{:keys [request] :as ctx} {:keys [etag last-modified] :as resource}]
+  (let [if-range (some-> (get-in request [:headers "if-range"]) str/trim)]
+    (cond
+      (nil? if-range)
+      true
+
+      (str/includes? if-range "\"")
+      (conditions/strong-match? if-range (some-> etag conditions/etag))
+
+      :else
+      (boolean (when-let [date (dates/parse-http-date if-range)]
+                 (and last-modified
+                      (= (quot (inst-ms date) 1000) (quot (inst-ms last-modified) 1000))))))))
+
+(defn- content-answer
+  "The answer to the GET of `ctx` once it checks out: the content of the
+  document, or the part of it that its Range asks for (RFC 9110, section
+  14), or a 416 when the document has none of that part."
+  [{:keys [request backend path resource] :as ctx}]
+  (let [length (:content-length resource)
+        range  (when (if-range-holds? ctx resource)
+                 (ring/byte-range (get-in request [:headers "range"]) length))]
+    (if (= :unsatisfiable range)
+      {:status  416
+       :headers {"Content-Range" (str "bytes */" length)}
+       :body    ""}
+      (async/then ((:content backend) path)
+                  (fn [content]
+                    (if-let [[start end] range]
+                      {:status  206
+                       :headers (assoc (representation resource)
+                                       "Content-Range" (str "bytes " start "-" end "/" length))
+                       :body    (ring/body (ring/slice content start end))}
+                      {:status  200
+                       :headers (representation resource)
+                       :body    (ring/body content)}))))))
 
 ;; RFC 9110, sections 9.3.1 and 9.3.2; RFC 4918, section 9.4
 (defn- get-response
   "The answer to GET or HEAD for the resource of `ctx`."
-  [{:keys [request backend path resource] :as ctx}]
+  [{:keys [request backend resource] :as ctx}]
   (cond
     (nil? resource)         (not-found)
     (:collection? resource) (not-allowed ctx)
@@ -455,11 +501,7 @@
                            (:content-length resource)
                            (assoc "Content-Length" (str (:content-length resource))))
                 :body    nil}
-               (async/then ((:content backend) path)
-                           (fn [content]
-                             {:status  200
-                              :headers (representation resource)
-                              :body    (ring/body content)}))))))
+               (content-answer ctx)))))
 
 ;; a failed If header is a 412 before a lock without its token is a 423,
 ;; as litmus expects
@@ -476,7 +518,7 @@
   "The answer to the PUT of `ctx` once it checks out: the body written, or
   a 413 when it's larger than :max-bytes."
   [{:keys [request backend opts path resource] :as ctx}]
-  (if-let [b (ring/body-bytes (:body request) (:max-bytes opts))]
+  (if-let [b (ring/request-body (:body request) (:max-bytes opts))]
     (async/then ((:put! backend)
                  path
                  b
@@ -881,7 +923,7 @@
                                               conflicting)]))
       (if resource
         (answer 200)
-        (async/then (ring/attempt #((:put! backend) path (bytes/encode "") {}))
+        (async/then (ring/attempt #((:put! backend) path (ring/put-body "") {}))
                     (fn [result]
                       (if-let [refused (::ring/refused result)]
                         (do (unlock! ctx (:token lock))

@@ -32,7 +32,7 @@
        (refuse 403 "The backend can't make collections"))
      (if put!
        (async/then (content from)
-                   #(put! to (ring/->bytes %)
+                   #(put! to (ring/put-body %)
                           {:content-type (:content-type resource)}))
        (refuse 403 "The backend can't write")))
    (fn [_] (copy-props! backend from to))))

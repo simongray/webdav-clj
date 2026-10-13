@@ -4,7 +4,8 @@
   (:require [clojure.string :as str]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.bytes :as bytes])
-  #?(:clj (:import [java.io ByteArrayInputStream InputStream])))
+  #?(:clj (:import [java.io ByteArrayInputStream FilterInputStream InputStream]
+                   [java.util Arrays])))
 
 (defn lower-case-headers
   "The `headers` of a Ring request with lower-case names, which a servlet
@@ -58,6 +59,113 @@
   [content]
   #?(:clj  (if (bytes? content) (ByteArrayInputStream. ^bytes content) content)
      :cljs content))
+
+#?(:clj
+   (defn limited
+     "The stream `in`, which throws a refusal of 413 once more than
+     `max-bytes` have been read from it."
+     ^InputStream [^InputStream in max-bytes]
+     (let [total   (volatile! 0)
+           counted (fn [n]
+                     (when (and (pos? n) (> (vswap! total + n) max-bytes))
+                       (throw (ex-info (str "The body holds more than " max-bytes " bytes")
+                                       {:dk.simongray.webdav/status 413})))
+                     n)]
+       (proxy [FilterInputStream] [in]
+         (read
+           ([]
+            (let [b (proxy-super read)]
+              (counted (if (neg? b) 0 1))
+              b))
+           ([bs]
+            (.read ^InputStream this ^bytes bs 0 (alength ^bytes bs)))
+           ([bs off len]
+            (counted (proxy-super read bs off len))))))))
+
+#?(:clj
+   (defn- bounded
+     "The stream `in`, which ends after `n` bytes."
+     ^InputStream [^InputStream in n]
+     (let [left (volatile! n)]
+       (proxy [FilterInputStream] [in]
+         (read
+           ([]
+            (if (pos? @left)
+              (let [b (proxy-super read)]
+                (when-not (neg? b) (vswap! left dec))
+                b)
+              -1))
+           ([bs]
+            (.read ^InputStream this ^bytes bs 0 (alength ^bytes bs)))
+           ([bs off len]
+            (if (pos? @left)
+              (let [k (proxy-super read bs off (int (min len @left)))]
+                (when (pos? k) (vswap! left - k))
+                k)
+              -1)))))))
+
+#?(:clj
+   (defn- skip!
+     "Skip `n` bytes of the stream `in`, or as many as it has."
+     [^InputStream in n]
+     (loop [left n]
+       (when (pos? left)
+         (let [k (.skip in left)]
+           (cond
+             (pos? k)              (recur (- left k))
+             (not (neg? (.read in))) (recur (dec left))))))))
+
+(defn put-body
+  "The `content` of a document as :put! takes it: on the JVM a stream, and
+  in ClojureScript bytes."
+  [content]
+  #?(:clj  (if (instance? InputStream content)
+             content
+             (ByteArrayInputStream. ^bytes (->bytes content)))
+     :cljs (->bytes content)))
+
+(defn request-body
+  "The `body` of a Ring request as :put! takes it, or nil when it's known
+  to hold more than `max-bytes` already. On the JVM a stream stays a
+  stream, which throws a refusal of 413 once more than `max-bytes` are
+  read from it, so that a backend can write it as it comes."
+  [body max-bytes]
+  #?(:clj  (if (instance? InputStream body)
+             (limited body max-bytes)
+             (some-> (body-bytes body max-bytes) put-body))
+     :cljs (body-bytes body max-bytes)))
+
+(defn slice
+  "The bytes from `start` to `end`, both included, of the `content` of a
+  document as a response body. A stream skips to `start`, e.g. a file's
+  without reading what it skips, and ends after `end`."
+  [content start end]
+  #?(:clj  (if (instance? InputStream content)
+             (bounded (doto ^InputStream content (skip! start)) (inc (- end start)))
+             (Arrays/copyOfRange ^bytes (->bytes content) (int start) (int (inc end))))
+     :cljs (.subarray (->bytes content) start (inc end))))
+
+;; RFC 9110, sections 14.1.1 and 14.1.2
+(defn byte-range
+  "The first and the last byte that the Range header value `s` asks for of
+  a document of `length` bytes, or :unsatisfiable when the document has
+  none of them. It's nil, for the whole document, when there's no header,
+  no length, or a header of anything but one range of bytes."
+  [s length]
+  (when-let [[_ a b] (some->> s str/trim
+                              (re-matches #"(?i)bytes\s*=\s*(\d{0,18})\s*-\s*(\d{0,18})"))]
+    (let [first-byte (some-> (not-empty a) parse-long)
+          last-byte  (some-> (not-empty b) parse-long)]
+      (when (and length
+                 (or first-byte last-byte)
+                 (not (and first-byte last-byte (> first-byte last-byte))))
+        (let [start (or first-byte (max 0 (- length last-byte)))
+              end   (if first-byte
+                      (min (dec length) (or last-byte (dec length)))
+                      (dec length))]
+          (if (or (>= start length) (> start end))
+            :unsatisfiable
+            [start end]))))))
 
 (defn charset
   "The charset of the Content-Type `media-type`, or nil."
